@@ -80,6 +80,7 @@ object BlueEdgeDetector {
         private val initialized = BooleanArray(4)
         private var lastTimestampNanos = 0L
 
+        @Synchronized
         fun reset() {
             lastAcceptedCorners = null
             smoothedCorners = null
@@ -96,6 +97,7 @@ object BlueEdgeDetector {
             lastTimestampNanos = 0L
         }
 
+        @Synchronized
         fun updateAndSmooth(newCorners: List<Offset>?, confidence: Float): Pair<List<Offset>?, Boolean> {
             val now = System.nanoTime()
 
@@ -283,11 +285,10 @@ object BlueEdgeDetector {
     fun analyzeImageProxy(imageProxy: ImageProxy): PremiumDetectionResult {
         val rotatedDegrees = imageProxy.imageInfo.rotationDegrees
 
-        val uprightAspect = if (rotatedDegrees == 90 || rotatedDegrees == 270) {
-            imageProxy.height.toFloat() / imageProxy.width.toFloat()
-        } else {
-            imageProxy.width.toFloat() / imageProxy.height.toFloat()
-        }
+        val isQuarterTurn = rotatedDegrees == 90 || rotatedDegrees == 270
+        val uprightWidth = if (isQuarterTurn) imageProxy.height else imageProxy.width
+        val uprightHeight = if (isQuarterTurn) imageProxy.width else imageProxy.height
+        val uprightAspect = uprightWidth.toFloat() / uprightHeight.coerceAtLeast(1)
 
         val detection = try {
             if (imageProxy.format == ImageFormat.YUV_420_888 && imageProxy.planes.isNotEmpty()) {
@@ -313,17 +314,21 @@ object BlueEdgeDetector {
         )
 
         if (isDetected && smoothedCorners != null && smoothedCorners.size == 4) {
+            // Detection points are normalized *after* rotating the YUV frame.
+            // Classify against the upright dimensions, not the sensor dimensions.
             val rawPts = smoothedCorners.map {
-                Point((it.x * imageProxy.width).toDouble(), (it.y * imageProxy.height).toDouble())
+                Point((it.x * uprightWidth).toDouble(), (it.y * uprightHeight).toDouble())
             }.toTypedArray()
 
-            val docType = classifyDocumentType(rawPts, imageProxy.width, imageProxy.height)
+            val docType = classifyDocumentType(rawPts, uprightWidth, uprightHeight)
 
             return PremiumDetectionResult(
                 corners = smoothedCorners,
                 isDocumentDetected = true,
                 frameAspectRatio = uprightAspect,
-                confidence = detection?.confidence ?: 0.75f,
+                // The tracker may briefly retain old corners during a missing frame.
+                // Never present that grace-period outline as a fresh confident capture.
+                confidence = detection?.confidence ?: 0f,
                 documentType = docType
             )
         }

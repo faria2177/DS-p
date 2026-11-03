@@ -116,6 +116,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -224,6 +225,8 @@ fun CameraScanScreen(
 
     // QR & Barcode Mode State Observers
     val mainScanMode by viewModel.mainScanMode.collectAsStateWithLifecycle()
+    // CameraX binds its analyzer once; read the latest mode without rebinding the camera.
+    val latestMainScanMode by rememberUpdatedState(mainScanMode)
     val qrScanSubMode by viewModel.qrScanSubMode.collectAsStateWithLifecycle()
     val isWideBarcodeMode by viewModel.isWideBarcodeMode.collectAsStateWithLifecycle()
     val activeScannedBarcode by viewModel.activeScannedBarcode.collectAsStateWithLifecycle()
@@ -251,6 +254,7 @@ fun CameraScanScreen(
 
     var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_OFF) } // OFF, AUTO, ON
     var isTorchOn by remember { mutableStateOf(false) }
+    val latestTorchOn by rememberUpdatedState(isTorchOn)
     var showMoreMenu by remember { mutableStateOf(false) }
     var showAllFeaturesSheet by remember { mutableStateOf(false) }
     var isShutterBusy by remember { mutableStateOf(false) }
@@ -519,7 +523,7 @@ fun CameraScanScreen(
     }
 
     // Auto-capture watcher when document remains stable
-    LaunchedEffect(detectedState) {
+    LaunchedEffect(detectedState, isAutoCaptureEnabled) {
         if (isAutoCaptureEnabled && detectedState == DetectionState.DOCUMENT_STABLE && !isShutterBusy && !isProcessing) {
             val now = System.currentTimeMillis()
             if (now - lastAutoCaptureTime.value > 2500) {
@@ -534,6 +538,17 @@ fun CameraScanScreen(
     DisposableEffect(Unit) {
         onDispose {
             cameraExecutor.shutdown()
+        }
+    }
+
+    // Clear tracking when the lens or scan mode changes. Run resets on the
+    // analyzer's executor to avoid racing an in-flight image-processing frame.
+    LaunchedEffect(lensFacing, mainScanMode) {
+        detectedCorners = emptyList()
+        detectedState = DetectionState.SEARCHING_DOCUMENT
+        cameraExecutor.execute {
+            motionDetector.reset()
+            BlueEdgeDetector.PremiumQuadTracker.reset()
         }
     }
 
@@ -566,13 +581,13 @@ fun CameraScanScreen(
                     .build()
 
                 imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    if (mainScanMode == MainScanMode.QR_BARCODE) {
+                    if (latestMainScanMode == MainScanMode.QR_BARCODE) {
                         val mediaImage = imageProxy.image
                         if (mediaImage != null) {
                             val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
                             val avgLum = BarcodeAnalyzerHelper.computeAverageLuminance(imageProxy)
                             coroutineScope.launch(Dispatchers.Main) {
-                                showLowLightHint = (avgLum < 35.0 && !isTorchOn)
+                                showLowLightHint = (avgLum < 35.0 && !latestTorchOn)
                             }
                             barcodeScanner.process(inputImage)
                                 .addOnSuccessListener { barcodes ->
@@ -580,6 +595,7 @@ fun CameraScanScreen(
                                         val first = barcodes.first()
                                         val parsed = BarcodeAnalyzerHelper.parseBarcode(first)
                                         coroutineScope.launch(Dispatchers.Main) {
+                                            if (latestMainScanMode != MainScanMode.QR_BARCODE) return@launch
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                             viewModel.onBarcodeDetected(parsed)
                                         }
@@ -606,6 +622,8 @@ fun CameraScanScreen(
                         }
 
                         coroutineScope.launch(Dispatchers.Main) {
+                            // Drop in-flight results from the previous scan mode.
+                            if (latestMainScanMode == MainScanMode.QR_BARCODE) return@launch
                             if (detection.isDocumentDetected && detection.corners.size == 4) {
                                 detectedCorners = detection.corners
                                 detectedFrameAspect = detection.frameAspectRatio
