@@ -1,0 +1,8 @@
+{
+  "name": "Remix Doc Scanner",
+  "description": "Offline document scanner with magic color filters, AI Photo Background Remover, multi-page PDF generation, perspective crop, watermark, and e-signature.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
