@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -24,9 +24,11 @@ jobs:
           java-version: '17'
 
       - name: Install Android SDK
-        uses: android-actions/setup-android@v3
+        id: android_sdk
+        uses: android-actions/setup-android@v4
 
       - name: Install Android 36 platform
+        id: android_platform
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Set up Gradle cache
@@ -36,7 +38,7 @@ jobs:
         run: bash ./gradlew :app:testDebugUnitTest --stacktrace
 
       - name: Build debug APK
-        if: ${{ always() }}
+        if: ${{ always() && steps.android_sdk.outcome == 'success' && steps.android_platform.outcome == 'success' }}
         run: bash ./gradlew :app:assembleDebug --stacktrace
 
       - name: Upload debug APK
