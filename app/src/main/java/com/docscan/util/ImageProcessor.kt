@@ -28,6 +28,11 @@ object ImageProcessor {
         targetWidth: Int = 0,
         targetHeight: Int = 0
     ): Bitmap {
+        // Crop handles and importers may briefly supply incomplete or non-finite
+        // coordinates. Preserve the original rather than indexing a missing point.
+        if (corners.size != 4 || corners.any { !it.x.isFinite() || !it.y.isFinite() }) {
+            return srcBitmap
+        }
         if (corners.size == 4) {
             try {
                 val cvCorners = corners.map {
@@ -85,7 +90,9 @@ object ImageProcessor {
         )
 
         val matrix = Matrix()
-        matrix.setPolyToPoly(srcPoints, 0, dstPoints, 0, 4)
+        if (!matrix.setPolyToPoly(srcPoints, 0, dstPoints, 0, 4)) {
+            return srcBitmap
+        }
 
         val mappedBitmap = Bitmap.createBitmap(outWidth.toInt(), outHeight.toInt(), Bitmap.Config.ARGB_8888)
         val canvas = Canvas(mappedBitmap)
