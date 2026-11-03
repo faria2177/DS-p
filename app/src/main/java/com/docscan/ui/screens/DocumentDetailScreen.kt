@@ -2,7 +2,6 @@ package com.docscan.ui.screens
 
 import com.docscan.util.ThemeManager
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -15,7 +14,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -157,6 +155,7 @@ import com.docscan.ui.components.WordExportDialog
 import com.docscan.ui.components.ExcelExportDialog
 import com.docscan.ui.components.PdfToImagesDialog
 import com.docscan.ui.components.SaveToGalleryConfirmDialog
+import com.docscan.data.model.ScanMode
 import com.docscan.ui.viewmodel.ScannerViewModel
 import com.docscan.util.FileUtils
 import kotlinx.coroutines.launch
@@ -255,45 +254,10 @@ fun DocumentDetailScreen(
     var dragOffset by remember { mutableStateOf(Offset.Zero) }
     var gridItemSize by remember { mutableStateOf(IntSize.Zero) }
 
-    val activity = context as? Activity
-
-    // Google ML Kit Document Scanner launcher
-    val mlKitScannerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { activityResult ->
-        if (activityResult.resultCode == Activity.RESULT_OK) {
-            val scanResult = com.docscan.util.MlKitDocumentScannerHelper.extractResult(activityResult.data)
-            if (scanResult != null && scanResult.imageUris.isNotEmpty()) {
-                viewModel.processMlKitScanResult(scanResult, targetDocumentId = documentId) {
-                    // Refreshed
-                }
-            }
-        }
-    }
-
-    // Always append pages through the same ML Kit scanner used on Home.
-    // Do not navigate to CameraAppend: that route hosts the legacy CameraX scanner.
-    fun launchMlKitAppend() {
-        val host = activity
-        if (host == null) {
-            Toast.makeText(context, "Scanner is unavailable", Toast.LENGTH_SHORT).show()
-            return
-        }
-        com.docscan.util.MlKitDocumentScannerHelper.startScanning(
-            activity = host,
-            options = com.docscan.util.MlKitDocumentScannerHelper.createDocumentScannerOptions(),
-            onIntentSenderReady = { sender ->
-                mlKitScannerLauncher.launch(IntentSenderRequest.Builder(sender).build())
-            },
-            onError = { error ->
-                // Never silently fall back to the legacy camera when ML Kit is unavailable.
-                Toast.makeText(
-                    context,
-                    "Cannot open ML Kit scanner: ${error.localizedMessage ?: "Google Play services required"}",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        )
+    // Append one page through our own camera; CropAppend handles document persistence.
+    fun launchNativeAppend() {
+        viewModel.prepareNativeDocumentScan(ScanMode.SINGLE)
+        onNavigateToCameraForAppend(documentId)
     }
 
     // Gallery Picker launcher
@@ -539,7 +503,7 @@ fun DocumentDetailScreen(
                         Text("No pages in this document", color = Color.Gray, fontSize = 14.sp)
                         Spacer(modifier = Modifier.height(12.dp))
                         Button(
-                            onClick = { launchMlKitAppend() },
+                            onClick = { launchNativeAppend() },
                             colors = ButtonDefaults.buttonColors(containerColor = TealAccent)
                         ) {
                             Icon(Icons.Default.Add, contentDescription = null, tint = Color.Black)
@@ -904,7 +868,7 @@ fun DocumentDetailScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(0.72f)
-                                    .clickable { launchMlKitAppend() }
+                                    .clickable { launchNativeAppend() }
                             ) {
                                 Column(
                                     modifier = Modifier.fillMaxSize(),
@@ -960,7 +924,7 @@ fun DocumentDetailScreen(
                     label = "Add",
                     icon = Icons.Default.Add,
                     testTag = "btn_action_add",
-                    onClick = { launchMlKitAppend() }
+                    onClick = { launchNativeAppend() }
                 )
 
                 BottomBarItem(

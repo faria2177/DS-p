@@ -7,7 +7,6 @@ import android.content.pm.ShortcutManager
 import android.graphics.drawable.Icon as AndroidIcon
 import android.os.Build
 import android.content.Context
-import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -18,7 +17,6 @@ import android.print.PrintManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
@@ -222,7 +220,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.docscan.MainActivity
@@ -259,8 +256,6 @@ import com.docscan.ui.theme.rememberAppThemePalette
 import com.docscan.ui.viewmodel.ScannerViewModel
 import com.docscan.util.AiOrchestrator
 import com.docscan.util.FileUtils
-import com.docscan.util.ScanPreferences
-import com.docscan.util.MlKitDocumentScannerHelper
 import com.docscan.util.PageSize
 import com.docscan.util.PdfExportConfig
 import com.docscan.util.PdfExporter
@@ -271,17 +266,6 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-private fun Context.findActivity(): Activity? {
-    var currentContext = this
-    while (currentContext is ContextWrapper) {
-        if (currentContext is Activity) {
-            return currentContext
-        }
-        currentContext = currentContext.baseContext
-    }
-    return null
-}
 
 // Dynamic Design System Colors supporting Light, Dark, and System Default themes
 private val ThemeDarkBg: Color @Composable get() = rememberAppThemePalette().background
@@ -424,12 +408,6 @@ fun HomeScreen(
 
     // Animated Camera Speed Dial state
     var isSpeedDialOpen by remember { mutableStateOf(false) }
-    var isScanningIdCard by remember { mutableStateOf(false) }
-    // Keep the Home UI fully covered while the external ML Kit NID activity returns and
-    // its two pages are converted into the in-app Front/Back review state. This prevents
-    // the brief Home-screen flash that was visible before the NID preview appeared.
-    var isNidReturnTransition by remember { mutableStateOf(false) }
-
     // Close speed dial if tab changes or selection mode starts
     LaunchedEffect(selectedNavTab, isSelectionMode) {
         if (isSpeedDialOpen) {
@@ -437,72 +415,17 @@ fun HomeScreen(
         }
     }
 
-    // Google ML Kit Document Scanner launcher
-    val mlKitScanLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { activityResult ->
-        if (activityResult.resultCode == Activity.RESULT_OK) {
-            val scanResult = MlKitDocumentScannerHelper.extractResult(activityResult.data)
-            if (scanResult != null && scanResult.imageUris.isNotEmpty()) {
-                val isIdCardResult = isScanningIdCard
-                if (isIdCardResult) isNidReturnTransition = true
-                viewModel.processMlKitScanResult(
-                    scanResult = scanResult,
-                    isIdCardMode = isIdCardResult
-                ) {
-                    if (isIdCardResult) {
-                        onNavigateToDocumentPreview()
-                        coroutineScope.launch {
-                            kotlinx.coroutines.delay(350)
-                            isNidReturnTransition = false
-                        }
-                    } else {
-                        if (ScanPreferences.reviewAfterScan(context)) onNavigateToCrop()
-                        else onNavigateToDocumentPreview()
-                    }
-                }
-            } else {
-                isNidReturnTransition = false
-            }
-        } else {
-            isNidReturnTransition = false
-        }
-    }
-
-    fun launchMlKitScanner(isIdCard: Boolean) {
-        // NID must always use our app-owned CameraX capture UI. Never launch the
-        // Google ML Kit document-scanner activity for ID cards, otherwise the
-        // SDK-owned scanner screen replaces the custom Front/Back experience.
-        if (isIdCard) {
-            isScanningIdCard = false
-            isNidReturnTransition = false
+    // All scan entries use our on-device CameraX/OpenCV scanner, including Tools modes.
+    fun launchNativeScanner(
+        mode: ScanMode = ScanMode.SINGLE,
+        featureMode: ScannerFeatureMode = ScannerFeatureMode.SCAN
+    ) {
+        if (mode == ScanMode.ID_CARD || featureMode == ScannerFeatureMode.ID_CARDS) {
             viewModel.enterNidCardMode()
             onNavigateToNidSetup()
-            return
-        }
-
-        isScanningIdCard = false
-        viewModel.scanMode.value = ScanMode.BATCH
-
-        val act = context.findActivity()
-        if (act != null) {
-            val options = MlKitDocumentScannerHelper.createDocumentScannerOptions()
-            MlKitDocumentScannerHelper.startScanning(
-                activity = act,
-                options = options,
-                onIntentSenderReady = { intentSender ->
-                    mlKitScanLauncher.launch(
-                        IntentSenderRequest.Builder(intentSender).build()
-                    )
-                },
-                onError = { e ->
-                    isNidReturnTransition = false
-                    Toast.makeText(context, "ML Kit Scanner: ${e.localizedMessage ?: "Opening camera"}", Toast.LENGTH_SHORT).show()
-                    onNavigateToCamera()
-                }
-            )
         } else {
-            Toast.makeText(context, "Cannot open scanner in current window context", Toast.LENGTH_SHORT).show()
+            viewModel.prepareNativeDocumentScan(mode, featureMode)
+            onNavigateToCamera()
         }
     }
 
@@ -866,7 +789,7 @@ fun HomeScreen(
                                 buttonBg = Color(0xFF0284C7),
                                 onClick = {
                                     isSpeedDialOpen = false
-                                    launchMlKitScanner(isIdCard = true)
+                                    launchNativeScanner(mode = ScanMode.ID_CARD)
                                 }
                             )
 
@@ -878,7 +801,7 @@ fun HomeScreen(
                                 buttonBg = ThemeAccentTeal,
                                 onClick = {
                                     isSpeedDialOpen = false
-                                    launchMlKitScanner(isIdCard = false)
+                                    launchNativeScanner()
                                 }
                             )
                         }
@@ -949,7 +872,7 @@ fun HomeScreen(
                         onToggleSelection = { docId ->
                             viewModel.toggleDocSelection(docId)
                         },
-                        onNavigateToCamera = { launchMlKitScanner(isIdCard = false) }
+                        onNavigateToCamera = { launchNativeScanner() }
                     )
                 }
 
@@ -987,20 +910,17 @@ fun HomeScreen(
                             viewModel.toggleDocSelection(docId)
                         },
                         onNewFolderClick = { showNewFolderDialog = true },
-                        onNavigateToCamera = { launchMlKitScanner(isIdCard = false) }
+                        onNavigateToCamera = { launchNativeScanner() }
                     )
                 }
 
                 "Tools" -> {
                     ToolsContent(
                         onSelectScanMode = { mode, featureMode ->
-                            if (mode == ScanMode.ID_CARD) {
-                                launchMlKitScanner(isIdCard = true)
-                            } else {
-                                viewModel.scanMode.value = mode
-                                featureMode?.let { viewModel.activeFeatureMode.value = it }
-                                launchMlKitScanner(isIdCard = false)
-                            }
+                            launchNativeScanner(
+                                mode = mode,
+                                featureMode = featureMode ?: ScannerFeatureMode.SCAN
+                            )
                         },
                         onExtractText = {
                             onNavigateToExtractText()
@@ -1027,7 +947,7 @@ fun HomeScreen(
                                 showDocSelectForTool = "Resize PDF"
                             } else {
                                 Toast.makeText(context, "Scan or import a document first", Toast.LENGTH_SHORT).show()
-                                launchMlKitScanner(isIdCard = false)
+                                launchNativeScanner()
                             }
                         },
                         onSplitPdf = {
@@ -1048,7 +968,7 @@ fun HomeScreen(
                                 onNavigateToDocumentDetail(firstDoc.id)
                             } else {
                                 Toast.makeText(context, "Scan or import a document first to use Smart Erase", Toast.LENGTH_SHORT).show()
-                                launchMlKitScanner(isIdCard = false)
+                                launchNativeScanner()
                             }
                         },
                         onEraseMarks = {
@@ -1057,7 +977,7 @@ fun HomeScreen(
                                 onNavigateToDocumentDetail(firstDoc.id)
                             } else {
                                 Toast.makeText(context, "Scan or import a document first", Toast.LENGTH_SHORT).show()
-                                launchMlKitScanner(isIdCard = false)
+                                launchNativeScanner()
                             }
                         },
                         onMergeFiles = {
@@ -1106,7 +1026,7 @@ fun HomeScreen(
                 "Settings" -> {
                     SettingsTabContent(
                         totalDocumentsCount = documents.size,
-                        onNavigateToScan = { launchMlKitScanner(isIdCard = false) },
+                        onNavigateToScan = { launchNativeScanner() },
                         onNavigateToFiles = { selectedNavTab = "Files" }
                     )
                 }
@@ -1228,7 +1148,7 @@ fun HomeScreen(
                     Button(
                         onClick = {
                             showDocSelectForTool = null
-                            launchMlKitScanner(isIdCard = false)
+                            launchNativeScanner()
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = ThemeAccentTeal)
                     ) {
@@ -2166,39 +2086,6 @@ fun HomeScreen(
         )
     }
 
-    // Full-screen transition cover for NID. The external ML Kit scanner returns to Home
-    // before Compose navigation can open the NID preview; keeping this dialog active avoids
-    // exposing the Home interface during that processing window.
-    if (isNidReturnTransition) {
-        Dialog(
-            onDismissRequest = { },
-            properties = DialogProperties(
-                dismissOnBackPress = false,
-                dismissOnClickOutside = false,
-                usePlatformDefaultWidth = false
-            )
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFF111111)),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    CircularProgressIndicator(color = ThemeAccentTeal)
-                    Text(
-                        text = "Preparing NID Front & Back…",
-                        color = Color.White,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-        }
-    }
 }
 
 // =========================================================================================

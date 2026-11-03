@@ -29,7 +29,6 @@ import com.docscan.util.EdgeDetector
 import com.docscan.util.FileUtils
 import com.docscan.util.GeminiAiService
 import com.docscan.util.ImageProcessor
-import com.docscan.util.MlKitDocumentScannerHelper
 import com.docscan.util.NetworkStatus
 import com.docscan.util.NetworkUtils
 import com.docscan.util.NidAutoProcessor
@@ -78,9 +77,8 @@ data class TempScannedPage(
     var watermarkColor: Long = 0xFF555555,
     var label: String = "Page",
     /**
-     * True when the image came from Google ML Kit Document Scanner.
-     * ML Kit has already detected the document, corrected perspective and cropped the page,
-     * so the custom crop editor should treat the full returned JPEG as the ML Kit auto-crop result.
+     * Compatibility flag for previously processed scans.
+     * New CameraX/OpenCV captures always keep this false.
      */
     var mlKitProcessed: Boolean = false
 )
@@ -249,6 +247,38 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     /** True only while the reference-style Scan ID screen has opened CameraX for one side. */
     val isNidSetupCapture = MutableStateFlow(false)
 
+    /**
+     * Start a fresh local scan, preserving the selected document/Tools mode.
+     * Only UI state is reset: old scan files are never deleted from the shared temp folder.
+     */
+    fun prepareNativeDocumentScan(
+        mode: ScanMode = ScanMode.SINGLE,
+        featureMode: ScannerFeatureMode = ScannerFeatureMode.SCAN
+    ) {
+        if (mode == ScanMode.ID_CARD || featureMode == ScannerFeatureMode.ID_CARDS) {
+            enterNidCardMode()
+            return
+        }
+        capturedPages.value = emptyList()
+        currentCropPageIndex.value = 0
+        idCardFront.value = null
+        idCardBack.value = null
+        idCardStep.value = 1
+        isNidSetupCapture.value = false
+        showIdCardIntro.value = false
+        nidProcessingStage.value = null
+        isProcessing.value = false
+        scanMode.value = mode
+        activeFeatureMode.value = featureMode
+        mainScanMode.value = MainScanMode.DOCUMENT
+        isQrOnlyMode.value = false
+        activeScannedBarcode.value = null
+        isAutoCropEnabled.value = ScanPreferences.autoAdjustBorders(context)
+        isAutoCaptureEnabled.value = true
+        isMagicEnhanceEnabled.value = true
+        sessionDocumentTitle.value = ScanPreferences.newDocumentTitle(context)
+    }
+
     fun enterNidCardMode() {
         scanMode.value = ScanMode.ID_CARD
         activeFeatureMode.value = ScannerFeatureMode.ID_CARDS
@@ -295,21 +325,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         isAutoCropEnabled.value = true
     }
 
-    /**
-     * Prepare one slot on the Scan ID landing page for Google ML Kit Document Scanner.
-     * The ML Kit activity owns capture + auto-crop, so CameraX capture state must stay disabled.
-     */
-    fun prepareNidMlKitSide(side: Int) {
-        scanMode.value = ScanMode.ID_CARD
-        activeFeatureMode.value = ScannerFeatureMode.ID_CARDS
-        selectedIdCardType.value = IdCardType.ID_CARD
-        idCardStep.value = if (side == 2) 2 else 1
-        isNidSetupCapture.value = false
-        isAutoCaptureEnabled.value = false
-        isMagicEnhanceEnabled.value = false
-        isAutoCropEnabled.value = true
-    }
-
     private fun upsertNidSetupPage(side: Int, page: TempScannedPage) {
         val sidePrefix = if (side == 1) "Front" else "Back"
         val filtered = capturedPages.value.filterNot {
@@ -325,94 +340,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-
-    /**
-     * Import exactly one side returned by Google ML Kit Document Scanner.
-     * ML Kit has already auto-cropped and perspective-corrected the JPEG, therefore the full
-     * returned image is stored as the editable NID side without a second custom crop.
-     */
-    fun processNidMlKitSideResult(
-        scanResult: MlKitDocumentScannerHelper.ScanResult,
-        side: Int,
-        onDone: () -> Unit = {}
-    ) {
-        val safeSide = if (side == 2) 2 else 1
-        viewModelScope.launch(Dispatchers.IO) {
-            isProcessing.value = true
-            nidProcessingStage.value = if (safeSide == 1) {
-                "Loading ML Kit front crop…"
-            } else {
-                "Loading ML Kit back crop…"
-            }
-
-            try {
-                val uri = scanResult.imageUris.firstOrNull()
-                    ?: throw IllegalStateException("ML Kit did not return an image")
-                val originalPath = FileUtils.copyImageUriToTempPreservingBytes(
-                    context = context,
-                    uri = uri,
-                    prefix = if (safeSide == 1) "NID_FRONT_MLKIT_RAW" else "NID_BACK_MLKIT_RAW"
-                ) ?: throw IllegalStateException("Could not import ML Kit image")
-
-                // Preserve substantially more source detail than the generic 2048px preview path.
-                val bitmap = FileUtils.loadBitmap(originalPath, maxDimension = 4096)
-                    ?: throw IllegalStateException("Could not decode ML Kit image")
-                val isFront = safeSide == 1
-                val cleanedBitmap = NidCleanProcessor.enhance(bitmap, isFront = isFront)
-                val processedPath = FileUtils.saveBitmapToDocStorage(
-                    context = context,
-                    bitmap = cleanedBitmap,
-                    prefix = if (isFront) "NID_FRONT_CLEAN" else "NID_BACK_CLEAN",
-                    quality = 100
-                )
-
-                val ocrText = runCatching { TextRecognizerHelper.extractText(cleanedBitmap) }
-                    .getOrDefault("")
-                val label = if (isFront) "Front Side (NID Card)" else "Back Side (NID Card)"
-                val fullFrameCorners = listOf(
-                    Offset(0f, 0f),
-                    Offset(1f, 0f),
-                    Offset(1f, 1f),
-                    Offset(0f, 1f)
-                )
-
-                upsertNidSetupPage(
-                    safeSide,
-                    TempScannedPage(
-                        originalPath = originalPath,
-                        processedPath = processedPath,
-                        corners = fullFrameCorners,
-                        filterType = FilterType.ORIGINAL,
-                        label = label,
-                        mlKitProcessed = true
-                    )
-                )
-
-                if (isFront) {
-                    idCardFront.value = cleanedBitmap
-                    nidFrontOcrText.value = ocrText
-                } else {
-                    idCardBack.value = cleanedBitmap
-                    nidBackOcrText.value = ocrText
-                }
-                currentCropPageIndex.value = (safeSide - 1).coerceAtLeast(0)
-            } catch (error: Throwable) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(
-                        context,
-                        "Could not import NID side: ${error.message ?: "Unknown error"}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                }
-            } finally {
-                isProcessing.value = false
-                nidProcessingStage.value = null
-                isNidSetupCapture.value = false
-            }
-
-            withContext(Dispatchers.Main) { onDone() }
-        }
-    }
 
     private suspend fun processNidSetupSideInternal(
         bitmap: Bitmap,
@@ -1009,7 +936,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             val detectedCorners = if (scanMode.value == ScanMode.ID_CARD) {
                 customCorners ?: EdgeDetector.idCardFrameCorners()
             } else {
-                customCorners ?: if (ScanPreferences.autoAdjustBorders(context)) EdgeDetector.detectDocumentCorners(bitmap) else listOf(Offset(0f, 0f), Offset(1f, 0f), Offset(1f, 1f), Offset(0f, 1f))
+                customCorners ?: if (isAutoCropEnabled.value && ScanPreferences.autoAdjustBorders(context)) EdgeDetector.detectDocumentCorners(bitmap) else listOf(Offset(0f, 0f), Offset(1f, 0f), Offset(1f, 1f), Offset(0f, 1f))
             }
             val initialFilter = if (isMagicEnhanceEnabled.value) FilterType.MAGIC_COLOR else FilterType.ORIGINAL
             val tempPath = FileUtils.saveBitmapToTemp(context, bitmap)
@@ -1573,190 +1500,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-
-    /**
-     * Processes images returned from the ML Kit Document Scanner API.
-     * The ML Kit Document Scanner automatically detects edges, performs perspective correction,
-     * cleans shadows, and applies enhancement.
-     * We import these perspective-corrected high-res images, perform on-device OCR, and open the in-app review screen so the user can rotate/crop/adjust before saving.
-     */
-    fun processMlKitScanResult(
-        scanResult: MlKitDocumentScannerHelper.ScanResult,
-        targetDocumentId: Long? = null,
-        isIdCardMode: Boolean = (scanMode.value == ScanMode.ID_CARD),
-        onNavigateToPreview: () -> Unit
-    ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            isProcessing.value = true
-            try {
-                val tempPages = mutableListOf<TempScannedPage>()
-                val pageEntities = mutableListOf<PageEntity>()
-
-                // For ID Card mode, strictly take only the 2 sides (Front & Back)
-                val urisToProcess = if (isIdCardMode) {
-                    scanResult.imageUris.take(2)
-                } else {
-                    scanResult.imageUris
-                }
-
-                if (isIdCardMode && urisToProcess.size < 2) {
-                    withContext(Dispatchers.Main) {
-                        isProcessing.value = false
-                        Toast.makeText(context, "Please scan both NID Front and NID Back sides.", Toast.LENGTH_LONG).show()
-                    }
-                    return@launch
-                }
-
-                for ((index, uri) in urisToProcess.withIndex()) {
-                    // Preserve the ML Kit JPEG byte-for-byte.  Decoding and then
-                    // encoding it again before enhancement used to lose fine print.
-                    val tempPath = FileUtils.copyImageUriToTempPreservingBytes(
-                        context,
-                        uri,
-                        if (isIdCardMode) {
-                            if (index == 0) "NID_FRONT_MLKIT_RAW" else "NID_BACK_MLKIT_RAW"
-                        } else {
-                            "MLKIT_PAGE_RAW"
-                        }
-                    ) ?: continue
-                    val bitmap = FileUtils.loadBitmap(
-                        tempPath,
-                        maxDimension = 4096
-                    ) ?: continue
-                    val displayBitmap = if (isIdCardMode) {
-                        NidCleanProcessor.enhance(bitmap, isFront = index == 0)
-                    } else {
-                        // A clean paper/ink rendering for standard documents;
-                        // the untouched ML Kit JPEG stays at originalPath.
-                        ImageProcessor.applyFilter(bitmap, FilterType.MAGIC_COLOR)
-                    }
-                    val initialFilter = if (isIdCardMode) FilterType.ORIGINAL else FilterType.MAGIC_COLOR
-
-                    // Document corners are already perspective-rectified by ML Kit
-                    val corners = listOf(
-                        Offset(0f, 0f),
-                        Offset(1f, 0f),
-                        Offset(1f, 1f),
-                        Offset(0f, 1f)
-                    )
-
-                    // Extract on-device ML Kit OCR
-                    val ocrText = if (ScanPreferences.enableBackgroundOcr(context)) {
-                        try { TextRecognizerHelper.extractText(displayBitmap) } catch (_: Exception) { "" }
-                    } else ""
-
-                    val finalDocPath = FileUtils.saveBitmapToDocStorage(
-                        context = context,
-                        bitmap = displayBitmap,
-                        prefix = if (isIdCardMode) "NID_CLEAN" else "PAGE",
-                        quality = if (isIdCardMode) 100 else 98
-                    )
-                    if (targetDocumentId != null && targetDocumentId > 0 && !isIdCardMode) {
-                        ScanPreferences.copyImageToGallery(context, finalDocPath)
-                    }
-                    // When appending directly to an existing document, retain an
-                    // unmodified copy outside the temporary cache for later refiltering.
-                    val originalForStoredPage = if (targetDocumentId != null && targetDocumentId > 0) {
-                        runCatching {
-                            val dest = File(
-                                FileUtils.getDocumentsDir(context),
-                                FileUtils.generateFileName("MLKIT_ORIGINAL")
-                            )
-                            File(tempPath).copyTo(dest)
-                            dest.absolutePath
-                        }.getOrDefault(tempPath)
-                    } else tempPath
-                    val pageLabel = if (isIdCardMode) {
-                        if (index == 0) "Front Side" else if (index == 1) "Back Side" else "Page ${index + 1}"
-                    } else {
-                        "Page ${index + 1}"
-                    }
-
-                    tempPages.add(
-                        TempScannedPage(
-                            originalPath = tempPath,
-                            processedPath = finalDocPath,
-                            corners = corners,
-                            filterType = initialFilter,
-                            label = pageLabel,
-                            mlKitProcessed = true
-                        )
-                    )
-
-                    pageEntities.add(
-                        PageEntity(
-                            documentId = targetDocumentId ?: 0,
-                            pageNumber = index + 1,
-                            originalImagePath = originalForStoredPage,
-                            processedImagePath = finalDocPath,
-                            filterType = initialFilter.name,
-                            brightness = 0f,
-                            contrast = 1f,
-                            rotationDegrees = 0,
-                            watermarkText = null,
-                            extractedText = ocrText.ifBlank { null },
-                            notes = if (isIdCardMode) pageLabel else null
-                        )
-                    )
-                }
-
-                if (pageEntities.isNotEmpty()) {
-                    if (targetDocumentId != null && targetDocumentId > 0) {
-                        repository.addPagesToDocument(targetDocumentId, pageEntities)
-                        loadDocumentDetails(targetDocumentId)
-                        withContext(Dispatchers.Main) {
-                            isProcessing.value = false
-                            Toast.makeText(context, "Added ${pageEntities.size} page(s) with ML Kit", Toast.LENGTH_SHORT).show()
-                            onNavigateToPreview()
-                        }
-                    } else {
-                        val timeStamp = SimpleDateFormat("dd-MM-yyyy HH.mm", Locale.getDefault()).format(Date())
-                        val docTitle = if (isIdCardMode) "NID Card $timeStamp" else ScanPreferences.newDocumentTitle(context)
-
-                        capturedPages.value = tempPages
-                        currentCropPageIndex.value = 0
-                        sessionDocumentTitle.value = docTitle
-                        // The actual ML Kit result determines preview layout:
-                        // one standard page -> SINGLE; multiple -> BATCH.
-                        // NID retains its dedicated two-sided preview.
-                        scanMode.value = when {
-                            isIdCardMode -> ScanMode.ID_CARD
-                            tempPages.size == 1 -> ScanMode.SINGLE
-                            else -> ScanMode.BATCH
-                        }
-                        if (isIdCardMode) {
-                            scanMode.value = ScanMode.ID_CARD
-                            activeFeatureMode.value = ScannerFeatureMode.ID_CARDS
-                            selectedIdCardType.value = IdCardType.ID_CARD
-                            idCardStep.value = 1
-                        }
-
-                        withContext(Dispatchers.Main) {
-                            isProcessing.value = false
-                            val modeMsg = if (isIdCardMode) {
-                                "NID Front & Back scanned! You can now rotate, crop, or adjust them."
-                            } else {
-                                "Scanned ${pageEntities.size} page(s) with ML Kit"
-                            }
-                            Toast.makeText(context, modeMsg, Toast.LENGTH_SHORT).show()
-                            onNavigateToPreview()
-                        }
-                    }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        isProcessing.value = false
-                        Toast.makeText(context, "No pages scanned", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                withContext(Dispatchers.Main) {
-                    isProcessing.value = false
-                    Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
 
     fun removeCapturedPage(index: Int) {
         val list = capturedPages.value.toMutableList()

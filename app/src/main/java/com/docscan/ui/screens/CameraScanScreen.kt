@@ -1,7 +1,6 @@
 package com.docscan.ui.screens
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -12,7 +11,6 @@ import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
@@ -171,7 +169,6 @@ import com.docscan.util.BarcodeAnalyzerHelper
 import com.docscan.scanner.PremiumDetectionResult
 import com.docscan.util.DetectionState
 import com.docscan.util.FileUtils
-import com.docscan.util.MlKitDocumentScannerHelper
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -320,56 +317,6 @@ fun CameraScanScreen(
     LaunchedEffect(Unit) {
         if (!hasCameraPermission) {
             permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
-    }
-
-    val activity = context as? Activity
-
-    // Google ML Kit Document Scanner Launcher with automatic edge detection
-    val mlKitScanLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { activityResult ->
-        if (activityResult.resultCode == Activity.RESULT_OK) {
-            val scanResult = MlKitDocumentScannerHelper.extractResult(activityResult.data)
-            if (scanResult != null && scanResult.imageUris.isNotEmpty()) {
-                val isIdCardResult = (scanMode == ScanMode.ID_CARD)
-                viewModel.processMlKitScanResult(
-                    scanResult = scanResult,
-                    isIdCardMode = isIdCardResult
-                ) {
-                    if (isIdCardResult) {
-                        onNavigateToDocumentPreview()
-                    } else {
-                        onNavigateToCrop()
-                    }
-                }
-            }
-        }
-    }
-
-    fun launchMlKitScanner() {
-        // ML Kit's external document-scanner UI is reserved for normal document
-        // scanning. NID uses the dedicated CameraX UI rendered by this screen.
-        if (isNidCaptureMode) {
-            Toast.makeText(context, "NID uses the custom Front / Back scanner", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (activity != null) {
-            val options = MlKitDocumentScannerHelper.createDocumentScannerOptions()
-            MlKitDocumentScannerHelper.startScanning(
-                activity = activity,
-                options = options,
-                onIntentSenderReady = { intentSender ->
-                    mlKitScanLauncher.launch(
-                        IntentSenderRequest.Builder(intentSender).build()
-                    )
-                },
-                onError = { e ->
-                    Toast.makeText(context, "ML Kit Scanner: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                }
-            )
-        } else {
-            Toast.makeText(context, "Cannot launch scanner in current window context", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -871,8 +818,9 @@ fun CameraScanScreen(
                         onHdClick = {
                             viewModel.isHdModeEnabled.value = !isHdModeEnabled
                         },
-                        onMlKitScanClick = {
-                            launchMlKitScanner()
+                        isAutoCaptureOn = isAutoCaptureEnabled,
+                        onAutoScanClick = {
+                            viewModel.isAutoCaptureEnabled.value = !isAutoCaptureEnabled
                         },
                         onMoreClick = { showMoreMenu = true }
                     )
@@ -885,25 +833,6 @@ fun CameraScanScreen(
                         onDismissRequest = { showMoreMenu = false },
                         modifier = Modifier.background(Color(0xFF1E2022))
                     ) {
-                        DropdownMenuItem(
-                            text = {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Default.DocumentScanner, contentDescription = null, tint = ScannerTealBright, modifier = Modifier.size(18.dp))
-                                    Column {
-                                        Text("ML Kit Auto Scanner", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                        Text("Google AI edge detection & auto-crop", color = Color.Gray, fontSize = 11.sp)
-                                    }
-                                }
-                            },
-                            onClick = {
-                                showMoreMenu = false
-                                launchMlKitScanner()
-                            }
-                        )
                         DropdownMenuItem(
                             text = {
                                 Row(
@@ -1685,7 +1614,8 @@ fun ScannerTopBar(
     onFlashClick: () -> Unit,
     onMagicEnhanceClick: () -> Unit,
     onHdClick: () -> Unit,
-    onMlKitScanClick: (() -> Unit)? = null,
+    isAutoCaptureOn: Boolean,
+    onAutoScanClick: (() -> Unit)? = null,
     onMoreClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1711,15 +1641,15 @@ fun ScannerTopBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ML Kit Auto-Scan Launcher Button
-            if (onMlKitScanClick != null) {
+            // In-app automatic capture control using CameraX and OpenCV.
+            if (onAutoScanClick != null) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
-                    color = Color(0x7700BFA5),
+                    color = if (isAutoCaptureOn) Color(0xAA00BFA5) else Color(0x77000000),
                     border = androidx.compose.foundation.BorderStroke(1.dp, ScannerTealBright.copy(alpha = 0.8f)),
                     modifier = Modifier
                         .height(36.dp)
-                        .clickable { onMlKitScanClick() }
+                        .clickable { onAutoScanClick() }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -1728,12 +1658,12 @@ fun ScannerTopBar(
                     ) {
                         Icon(
                             Icons.Default.DocumentScanner,
-                            contentDescription = "ML Kit Auto Scanner",
+                            contentDescription = "Toggle automatic document capture",
                             tint = Color.White,
                             modifier = Modifier.size(16.dp)
                         )
                         Text(
-                            "ML Kit",
+                            if (isAutoCaptureOn) "Auto On" else "Auto",
                             color = Color.White,
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.sp

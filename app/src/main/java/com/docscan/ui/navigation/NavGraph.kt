@@ -708,6 +708,9 @@ fun AppNavGraph(
                             popUpTo(Screen.NidSetup.route) { inclusive = true }
                         }
                     }
+                },
+                onScanSide = {
+                    navController.navigate(Screen.Camera.route)
                 }
             )
         }
