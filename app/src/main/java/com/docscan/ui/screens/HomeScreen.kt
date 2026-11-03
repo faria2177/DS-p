@@ -7,6 +7,7 @@ import android.content.pm.ShortcutManager
 import android.graphics.drawable.Icon as AndroidIcon
 import android.os.Build
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
