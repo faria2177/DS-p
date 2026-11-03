@@ -1,0 +1,48 @@
+name: Android Build and Tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36 platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run Android unit tests
+        run: bash ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        if: ${{ always() }}
+        run: bash ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload debug APK
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: DocScanner-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
