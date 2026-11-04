@@ -1217,8 +1217,8 @@ object EdgeDetector {
     /**
      * High-accuracy still-image / gallery / PDF-page corner detection.
      *
-     * Designed to correctly find INNER documents (e.g. NID card on a white
-     * sheet) rather than locking onto the outer paper edge.
+     * For ordinary document scans the full outer paper is the target.
+     * Inner boxes on forms must not override a valid enclosing page boundary.
      *
      * Pipeline:
      *  1. Production multi-channel detector (RETR_LIST + border-penalised scoring)
@@ -1235,6 +1235,25 @@ object EdgeDetector {
         }
 
         val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+
+        // Prioritize the outer page detector on captured photos. Legacy detection
+        // stages below may prefer strong form/table lines inside a white sheet.
+        val blueOuterCandidate = runCatching {
+            com.docscan.scanner.BlueEdgeDetector.analyzeStillBitmap(bitmap)
+        }.getOrNull()
+        if (blueOuterCandidate != null && blueOuterCandidate.size == 4 &&
+            !isNearBlueDetectorDefault(blueOuterCandidate) &&
+            !isNearDefault(blueOuterCandidate) &&
+            isRealDocumentDetected(blueOuterCandidate, aspect)) {
+            val area = calculateQuadArea(
+                blueOuterCandidate[0], blueOuterCandidate[1],
+                blueOuterCandidate[2], blueOuterCandidate[3]
+            )
+            if (area >= 0.20f) {
+                Log.d(TAG, "Still detect: outer paper preferred area=$area")
+                return blueOuterCandidate
+            }
+        }
 
         // ── Strategy 0: Advanced Multi-Stage DocumentDetector (Subpixel + Intelligent Scoring)
         try {
@@ -1297,11 +1316,13 @@ object EdgeDetector {
 
         // ── Strategy 3: BlueEdgeDetector ──────────────────────────────────
         try {
-            val blueCorners = com.docscan.scanner.BlueEdgeDetector.analyzeStillBitmap(bitmap)
+            val blueCorners = blueOuterCandidate
             if (
+                blueCorners != null &&
                 blueCorners.size == 4 &&
                 isRealDocumentDetected(blueCorners, aspect) &&
-                !isNearDefault(blueCorners)
+                !isNearDefault(blueCorners) &&
+                !isNearBlueDetectorDefault(blueCorners)
             ) {
                 Log.d(TAG, "Still detect: strategy=blueEdge")
                 return blueCorners
@@ -1344,6 +1365,16 @@ object EdgeDetector {
         if (corners.size != 4) return false
         val area = calculateQuadArea(corners[0], corners[1], corners[2], corners[3])
         return area > 0.82f
+    }
+
+    private fun isNearBlueDetectorDefault(corners: List<Offset>): Boolean {
+        val fallback = com.docscan.scanner.BlueEdgeDetector.PremiumQuadTracker.defaultCorners()
+        if (corners.size != 4) return false
+        return corners.indices.sumOf { index ->
+            val dx = corners[index].x - fallback[index].x
+            val dy = corners[index].y - fallback[index].y
+            kotlin.math.sqrt(dx * dx + dy * dy).toDouble()
+        } < 0.08
     }
 
     private fun isNearDefault(corners: List<Offset>): Boolean {

@@ -130,10 +130,17 @@ object BlueEdgeDetector {
                 newCorners
             }
 
-            // Drastic jump verification
-            if (currentLast != null && trackCount >= 4 && isDrasticJump(currentLast, alignedCorners)) {
-                if (confidence < 0.65f) {
+            // Permit a newly found enclosing paper boundary to replace a smaller
+            // printed form cell immediately. Other drastic jumps still require
+            // higher confidence so the outline does not jump to nearby objects.
+            if (currentLast != null && trackCount >= 4 &&
+                isDrasticJump(currentLast, alignedCorners)) {
+                val outerPageUpgrade = isOutwardExpansion(currentLast, alignedCorners)
+                if (!outerPageUpgrade && confidence < 0.65f) {
                     return Pair(smoothedCorners, true)
+                }
+                if (outerPageUpgrade) {
+                    for (i in initialized.indices) initialized[i] = false
                 }
             }
 
@@ -264,6 +271,26 @@ object BlueEdgeDetector {
             }
             val maxDist = (0..3).maxOf { sqrt(dxs[it] * dxs[it] + dys[it] * dys[it]) }
             return maxDist > 0.25f || maxDeformation > 0.12f
+        }
+
+        private fun isOutwardExpansion(previous: List<Offset>, candidate: List<Offset>): Boolean {
+            if (previous.size != 4 || candidate.size != 4) return false
+            val oldLeft = previous.minOf { it.x }
+            val oldRight = previous.maxOf { it.x }
+            val oldTop = previous.minOf { it.y }
+            val oldBottom = previous.maxOf { it.y }
+            val newLeft = candidate.minOf { it.x }
+            val newRight = candidate.maxOf { it.x }
+            val newTop = candidate.minOf { it.y }
+            val newBottom = candidate.maxOf { it.y }
+            val previousArea = (oldRight - oldLeft) * (oldBottom - oldTop)
+            val candidateArea = (newRight - newLeft) * (newBottom - newTop)
+            val containsPrevious = oldLeft >= newLeft - 0.025f &&
+                oldRight <= newRight + 0.025f &&
+                oldTop >= newTop - 0.025f &&
+                oldBottom <= newBottom + 0.025f
+            return containsPrevious && previousArea > 0.001f &&
+                candidateArea > previousArea * 1.45f
         }
 
         fun defaultCorners(): List<Offset> = listOf(
@@ -421,7 +448,8 @@ object BlueEdgeDetector {
     private data class InternalCandidate(
         val rawPts: Array<Point>,
         val areaNorm: Float,
-        val confidence: Float
+        val confidence: Float,
+        val signedPaperContrast: Double
     )
 
     private fun detectFromYuv(
@@ -548,14 +576,22 @@ object BlueEdgeDetector {
 
             // CamScanner resilience: Every side must have real contrast, but allow single-edge glare if 3 sides are strongly supported
             val sidesAboveMin = perSide.count { it >= 0.06 }
-            val isEdgeSupported = (minSideSupport >= ScannerTuning.MIN_SIDE_EDGE_SUPPORT && avgSideSupport >= ScannerTuning.MIN_AVG_EDGE_SUPPORT) ||
+            val boundaryContrast = ScannerTuning.boundaryContrast(grayMat, ordered)
+            val paperContrast = if (qArea >= 0.16f) {
+                ScannerTuning.paperBoundaryPolarity(grayMat, ordered)
+            } else 0.0
+            val isEdgeSupported = (minSideSupport >= ScannerTuning.MIN_SIDE_EDGE_SUPPORT &&
+                    avgSideSupport >= ScannerTuning.MIN_AVG_EDGE_SUPPORT) ||
                     (sidesAboveMin >= 3 && avgSideSupport >= 0.16) ||
-                    (avgSideSupport >= 0.22)
+                    (avgSideSupport >= 0.22) ||
+                    // Full pages can have two faint borders against white paper.
+                    (qArea >= 0.24f && sidesAboveMin >= 2 &&
+                     avgSideSupport >= 0.10 && paperContrast >= 3.0)
             if (!isEdgeSupported) return
 
-            // The quadrilateral must coincide with a real luminance transition
-            val boundaryContrast = ScannerTuning.boundaryContrast(grayMat, ordered)
-            if (boundaryContrast < ScannerTuning.MIN_BOUNDARY_CONTRAST && avgSideSupport < 0.24) return
+            // Thin printed form boxes lack a consistently brighter interior.
+            if (boundaryContrast < ScannerTuning.MIN_BOUNDARY_CONTRAST &&
+                avgSideSupport < 0.24 && paperContrast < 3.0) return
 
             val geoScore = geom.score.toFloat().coerceIn(0f, 1f)
             val areaScore = when {
@@ -571,16 +607,18 @@ object BlueEdgeDetector {
             }
             val boundaryScore = (boundaryContrast / 25.0).toFloat().coerceIn(0f, 1f)
 
-            val confidence = (
+            val confidence = ((
                 0.24f * geoScore +
                 0.32f * avgSideSupport.toFloat().coerceIn(0f, 1f) +
                 0.15f * areaScore +
                 0.14f * aspectScore +
                 0.15f * boundaryScore
-            ).coerceIn(0f, 1f) * passWeight
+            ).coerceIn(0f, 1f) * passWeight +
+                (paperContrast / 35.0).coerceIn(0.0, 1.0).toFloat() * 0.12f
+            ).coerceIn(0f, 1f)
 
             if (confidence >= 0.40f) {
-                candidateList.add(InternalCandidate(ordered, qArea, confidence))
+                candidateList.add(InternalCandidate(ordered, qArea, confidence, paperContrast))
             }
         }
 
@@ -757,7 +795,9 @@ object BlueEdgeDetector {
 
         val pool = if (outerCandidates.isNotEmpty()) outerCandidates else candidateList
         // CamScanner priority: prefer outer boundary candidate with highest combined confidence + area prior
-        val best = pool.maxByOrNull { it.confidence + (it.areaNorm * 0.12f) } ?: return null
+        val best = pool.maxByOrNull {
+            ScannerTuning.outerPagePriority(it.confidence, it.areaNorm, it.signedPaperContrast)
+        } ?: return null
 
         if (best.confidence < 0.40f) return null
 

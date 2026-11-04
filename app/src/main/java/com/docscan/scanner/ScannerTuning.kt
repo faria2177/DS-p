@@ -82,6 +82,50 @@ object ScannerTuning {
         return if (count == 0) 0.0 else total / count
     }
 
+    /**
+     * Signed brightness difference across a quadrilateral: positive when its
+     * interior is brighter than the background (white paper on a desk).
+     * Ruled tables inside a white sheet tend to score near zero because both
+     * sides of the thin printed line are the same paper color.
+     */
+    fun paperBoundaryPolarity(gray: Mat, q: Array<Point>): Double {
+        if (gray.empty() || q.size != 4) return 0.0
+        val cx = q.sumOf { it.x } / 4.0
+        val cy = q.sumOf { it.y } / 4.0
+        val step = (min(gray.width(), gray.height()) * 0.018).coerceIn(4.0, 14.0)
+        var sum = 0.0
+        var count = 0
+        for (i in q.indices) {
+            val a = q[i]
+            val b = q[(i + 1) % 4]
+            val mx = (a.x + b.x) * 0.5
+            val my = (a.y + b.y) * 0.5
+            val length = hypot(cx - mx, cy - my).coerceAtLeast(1.0)
+            val nx = (cx - mx) / length
+            val ny = (cy - my) / length
+            for (t in doubleArrayOf(0.25, 0.50, 0.75)) {
+                val px = a.x + (b.x - a.x) * t
+                val py = a.y + (b.y - a.y) * t
+                val inside = sample(gray, px + nx * step, py + ny * step)
+                val outside = sample(gray, px - nx * step, py - ny * step)
+                if (inside != null && outside != null) {
+                    sum += inside - outside
+                    count++
+                }
+            }
+        }
+        return if (count == 0) 0.0 else sum / count
+    }
+
+    /** Prefer actual full-sheet contours to smaller, high-contrast form cells. */
+    fun outerPagePriority(confidence: Float, areaRatio: Float, signedPaperContrast: Double): Float {
+        val area = areaRatio.coerceIn(0f, 1f)
+        val areaBonus = (kotlin.math.sqrt(area.toDouble()) * 0.55).toFloat().coerceAtMost(0.46f)
+        val innerPenalty = if (area < 0.16f) 0.12f else 0f
+        val paperBonus = (signedPaperContrast / 32.0).coerceIn(0.0, 1.0).toFloat() * 0.22f
+        return confidence + areaBonus + paperBonus - innerPenalty
+    }
+
     private fun sample(gray: Mat, x: Double, y: Double): Double? {
         val ix = x.toInt()
         val iy = y.toInt()

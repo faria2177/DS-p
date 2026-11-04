@@ -2,6 +2,7 @@ package com.docscan
 
 import androidx.compose.ui.geometry.Offset
 import com.docscan.scanner.BlueEdgeDetector
+import com.docscan.scanner.ScannerTuning
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -54,4 +55,28 @@ class PremiumQuadTrackerTest {
         tracker.reset()
         assertFalse(tracker.updateAndSmooth(null, 0f).second)
     }
+    @Test
+    fun `outer document beats a small high-contrast form cell`() {
+        val internalCell = ScannerTuning.outerPagePriority(0.79f, 0.09f, 0.0)
+        val fullSheet = ScannerTuning.outerPagePriority(0.57f, 0.51f, 12.0)
+        assertTrue("Outer paper boundary should rank ahead of inner form boxes", fullSheet > internalCell)
+    }
+
+    @Test
+    fun `tracker unlocks inner box when enclosing paper is found`() {
+        val inner = listOf(
+            Offset(0.26f, 0.30f), Offset(0.74f, 0.30f),
+            Offset(0.74f, 0.70f), Offset(0.26f, 0.70f)
+        )
+        val outer = listOf(
+            Offset(0.07f, 0.09f), Offset(0.93f, 0.09f),
+            Offset(0.93f, 0.91f), Offset(0.07f, 0.91f)
+        )
+        repeat(5) { BlueEdgeDetector.PremiumQuadTracker.updateAndSmooth(inner, 0.94f) }
+        val upgraded = BlueEdgeDetector.PremiumQuadTracker.updateAndSmooth(outer, 0.58f)
+        assertTrue(upgraded.second)
+        assertNotNull(upgraded.first)
+        assertTrue("Bigger paper should replace stale inner box", upgraded.first!![0].x < 0.15f)
+    }
+
 }
