@@ -156,6 +156,10 @@ object BlueEdgeDetector {
                 }
                 if (maxDist < DEADBAND_THRESHOLD) {
                     lastAcceptedCorners = alignedCorners
+                    lastTimestampNanos = now
+                    // A steady frame is still a valid hit. Without incrementing,
+                    // the tracker never arms its larger-page upgrade after settling.
+                    trackCount = (trackCount + 1).coerceAtMost(1000)
                     return Pair(currentSmooth, true)
                 }
             }
@@ -577,9 +581,10 @@ object BlueEdgeDetector {
             // CamScanner resilience: Every side must have real contrast, but allow single-edge glare if 3 sides are strongly supported
             val sidesAboveMin = perSide.count { it >= 0.06 }
             val boundaryContrast = ScannerTuning.boundaryContrast(grayMat, ordered)
-            val paperContrast = if (qArea >= 0.16f) {
-                ScannerTuning.paperBoundaryPolarity(grayMat, ordered)
-            } else 0.0
+            val paperContrast = ScannerTuning.paperBoundaryPolarity(grayMat, ordered)
+            if (ScannerTuning.isLikelyPrintedInnerFrame(qArea, paperContrast, boundaryContrast)) {
+                return
+            }
             val isEdgeSupported = (minSideSupport >= ScannerTuning.MIN_SIDE_EDGE_SUPPORT &&
                     avgSideSupport >= ScannerTuning.MIN_AVG_EDGE_SUPPORT) ||
                     (sidesAboveMin >= 3 && avgSideSupport >= 0.16) ||

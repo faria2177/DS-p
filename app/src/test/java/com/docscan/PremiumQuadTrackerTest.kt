@@ -79,4 +79,12 @@ class PremiumQuadTrackerTest {
         assertTrue("Bigger paper should replace stale inner box", upgraded.first!![0].x < 0.15f)
     }
 
+    @Test
+    fun `small printed inner form is rejected without physical paper contrast`() {
+        assertTrue(ScannerTuning.isLikelyPrintedInnerFrame(0.09f, 0.8, 3.0))
+        assertFalse(ScannerTuning.isLikelyPrintedInnerFrame(0.09f, 13.0, 3.0))
+        assertFalse(ScannerTuning.isLikelyPrintedInnerFrame(0.09f, -15.0, 23.0))
+        assertFalse(ScannerTuning.isLikelyPrintedInnerFrame(0.42f, 0.8, 3.0))
+    }
+
 }

@@ -117,6 +117,18 @@ object ScannerTuning {
         return if (count == 0) 0.0 else sum / count
     }
 
+    /**
+     * A small rectangle with equally bright paper on both sides is usually a
+     * printed table or form field, not a physical sheet boundary.
+     */
+    fun isLikelyPrintedInnerFrame(
+        areaRatio: Float,
+        signedPaperContrast: Double,
+        absoluteBoundaryContrast: Double
+    ): Boolean =
+        areaRatio < 0.14f && signedPaperContrast < 6.0 &&
+            absoluteBoundaryContrast < 16.0
+
     /** Prefer actual full-sheet contours to smaller, high-contrast form cells. */
     fun outerPagePriority(confidence: Float, areaRatio: Float, signedPaperContrast: Double): Float {
         val area = areaRatio.coerceIn(0f, 1f)
