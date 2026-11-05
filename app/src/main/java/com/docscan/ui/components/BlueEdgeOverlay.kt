@@ -97,7 +97,7 @@ fun BlueEdgeOverlay(
                         animP1.snapTo(mapped[1])
                         animP2.snapTo(mapped[2])
                         animP3.snapTo(mapped[3])
-                        animAlpha.animateTo(1f, tween(140, easing = LinearOutSlowInEasing))
+                        animAlpha.animateTo(1f, tween(90, easing = LinearOutSlowInEasing))
                     } else {
                         // Small changes are sensor/detection jitter, not paper
                         // motion. Once aligned, use a larger hold band so the
@@ -112,7 +112,7 @@ fun BlueEdgeOverlay(
                         if (maxDelta >= holdBandPx) {
                             val glideSpring = spring<Offset>(
                                 dampingRatio = Spring.DampingRatioNoBouncy,
-                                stiffness = Spring.StiffnessMediumLow
+                                stiffness = Spring.StiffnessHigh
                             )
                             launch { animP0.animateTo(mapped[0], glideSpring) }
                             launch { animP1.animateTo(mapped[1], glideSpring) }

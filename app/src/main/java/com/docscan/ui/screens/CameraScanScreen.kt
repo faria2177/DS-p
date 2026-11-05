@@ -568,7 +568,7 @@ fun CameraScanScreen(
                                 detectedCorners = detection.corners
                                 detectedFrameAspect = detection.frameAspectRatio
                                 detectedState = when {
-                                    cameraState == CameraState.STABLE && detection.confidence >= 0.52f -> DetectionState.DOCUMENT_STABLE
+                                    cameraState == CameraState.STABLE && detection.confidence >= 0.48f -> DetectionState.DOCUMENT_STABLE
                                     else -> DetectionState.DOCUMENT_DETECTED
                                 }
                             } else {
@@ -1013,7 +1013,7 @@ fun CameraScanScreen(
                         val guideInfo = when {
                             detectedState == DetectionState.DOCUMENT_STABLE -> {
                                 AlignmentGuideInfo(
-                                    "Document Aligned ✓ Ready",
+                                    "Document Ready • Tap to Scan",
                                     Icons.Default.Check,
                                     Color(0xFF28D8A1).copy(alpha = 0.95f),
                                     Color.White,
@@ -1022,7 +1022,7 @@ fun CameraScanScreen(
                             }
                             detectedState == DetectionState.DOCUMENT_DETECTED -> {
                                 AlignmentGuideInfo(
-                                    "Hold Steady • Aligning Document...",
+                                    "Document Found • Adjusting Edges",
                                     Icons.Default.AutoFixHigh,
                                     Color(0xDD0F172A),
                                     Color(0xFF28D8A1),
@@ -1031,7 +1031,7 @@ fun CameraScanScreen(
                             }
                             else -> {
                                 AlignmentGuideInfo(
-                                    "Point at document & hold steady",
+                                    "Point camera at document",
                                     Icons.Default.DocumentScanner,
                                     Color(0xAA111827),
                                     Color(0xFFD1D5DB),

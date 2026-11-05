@@ -57,6 +57,22 @@ object BlueEdgeDetector {
     private const val TARGET_LONG_SIDE = 720
     private const val MIN_LONG_SIDE = 360
 
+    // Fast scan on every preview frame; reserve expensive recovery for
+    // ambiguous frames to avoid stalling CameraX's keep-only-latest queue.
+    private var liveFallbackSequence = 0L
+
+    @Synchronized
+    private fun fullLiveFallbackDue(): Boolean {
+        val due = liveFallbackSequence % 3L == 0L
+        liveFallbackSequence++
+        return due
+    }
+
+    @Synchronized
+    private fun resetFallbackSequence() {
+        liveFallbackSequence = 0L
+    }
+
     private val EPSILON_VALUES = floatArrayOf(0.012f, 0.018f, 0.025f, 0.035f, 0.048f)
 
     /**
@@ -562,7 +578,7 @@ object BlueEdgeDetector {
                 0.0, 0.0, Imgproc.INTER_AREA
             )
 
-            return multiPassDocumentDetection(scaledMat, wW, wH)
+            return multiPassDocumentDetection(scaledMat, wW, wH, liveMode = true)
         } finally {
             rawMat?.release()
             rotatedMat?.release()
@@ -586,7 +602,8 @@ object BlueEdgeDetector {
     private fun multiPassDocumentDetection(
         grayMat: Mat,
         wW: Int,
-        wH: Int
+        wH: Int,
+        liveMode: Boolean = false
     ): InternalResult? {
         val frameArea = (wW * wH).toDouble()
         val candidateList = ArrayList<InternalCandidate>()
@@ -729,6 +746,42 @@ object BlueEdgeDetector {
         }
 
         try {
+
+            // Fast physical-paper contour before heavier Scharr/Hough passes.
+            // Suppresses decorative texture without rejecting a faint sheet.
+            val fastGray = Mat()
+            val fastEdges = Mat()
+            val fastClosed = Mat()
+            val fastKernel = Imgproc.getStructuringElement(
+                Imgproc.MORPH_RECT, Size(7.0, 7.0)
+            )
+            try {
+                Imgproc.medianBlur(grayMat, fastGray, 9)
+                Imgproc.Canny(fastGray, fastEdges, 21.0, 67.0)
+                Imgproc.morphologyEx(
+                    fastEdges, fastClosed, Imgproc.MORPH_CLOSE, fastKernel
+                )
+                extractContoursAndQuads(
+                    fastClosed, frameArea, retrievalMode = Imgproc.RETR_LIST
+                ) { quad -> testAndRecordCandidate(quad, passWeight = 1.13f) }
+            } finally {
+                fastGray.release()
+                fastEdges.release()
+                fastClosed.release()
+                fastKernel.release()
+            }
+
+            val fastPaperFound = candidateList.any {
+                it.areaNorm >= 0.14f && it.surfaceScore >= 0.62f &&
+                    it.confidence >= 0.43f
+            }
+            if (fastPaperFound && liveMode) resetFallbackSequence()
+            // Preserve live responsiveness when the recovery passes are costly.
+            if (!fastPaperFound && liveMode && !fullLiveFallbackDue()) {
+                return null
+            }
+            // Still image extraction must run full detection for crop accuracy.
+            if (!fastPaperFound || !liveMode) {
             // --- PASS 0: CLAHE Local Adaptive Thresholding (Block size 25) ---
             val adaptMat0 = Mat()
             val kAdapt0 = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
@@ -867,33 +920,8 @@ object BlueEdgeDetector {
                 kGrad.release()
             }
 
-            // --- PASS 8 (only when needed): texture-suppressed paper outline ---
-            // Decorative fabric creates thousands of short high-contrast
-            // edges. A median-blurred frame suppresses those tiny edges but
-            // preserves the long physical sides of a partly torn sheet.
-            if (candidateList.none { it.areaNorm >= 0.18f && it.surfaceScore >= 0.62f }) {
-                val medianGray = Mat()
-                val medianEdges = Mat()
-                val joinedEdges = Mat()
-                val closeKernel = Imgproc.getStructuringElement(
-                    Imgproc.MORPH_RECT, Size(7.0, 7.0)
-                )
-                try {
-                    Imgproc.medianBlur(grayMat, medianGray, 9)
-                    Imgproc.Canny(medianGray, medianEdges, 21.0, 67.0)
-                    Imgproc.morphologyEx(
-                        medianEdges, joinedEdges, Imgproc.MORPH_CLOSE, closeKernel
-                    )
-                    extractContoursAndQuads(
-                        joinedEdges, frameArea, retrievalMode = Imgproc.RETR_LIST
-                    ) { quad -> testAndRecordCandidate(quad, passWeight = 1.13f) }
-                } finally {
-                    medianGray.release()
-                    medianEdges.release()
-                    joinedEdges.release()
-                    closeKernel.release()
-                }
-            }
+
+            } // end heavyweight recovery
         } finally {
             claheMat.release()
             cannyEdgeMat.release()
@@ -1257,7 +1285,7 @@ object BlueEdgeDetector {
 
             Imgproc.resize(gray, scaled, Size(wW.toDouble(), wH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
 
-            return multiPassDocumentDetection(scaled, wW, wH)
+            return multiPassDocumentDetection(scaled, wW, wH, liveMode = true)
         } finally {
             rgba.release()
             gray.release()
