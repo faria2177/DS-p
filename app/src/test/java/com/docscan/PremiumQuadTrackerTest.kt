@@ -101,6 +101,24 @@ class PremiumQuadTrackerTest {
             }
         }
     }
+
+    @Test
+    fun `a brief strong inner contour does not pull the outline off the page`() {
+        val tracker = BlueEdgeDetector.PremiumQuadTracker
+        repeat(6) { tracker.updateAndSmooth(quad, 0.92f) }
+        val inner = listOf(
+            Offset(0.29f, 0.30f), Offset(0.71f, 0.30f),
+            Offset(0.71f, 0.70f), Offset(0.29f, 0.70f)
+        )
+        repeat(2) {
+            val held = tracker.updateAndSmooth(inner, 0.94f)
+            assertTrue(held.second)
+            assertTrue("A transient inner form must not replace the page", held.first!![0].x < 0.20f)
+        }
+        val recovered = tracker.updateAndSmooth(quad, 0.92f)
+        assertTrue(recovered.second)
+        assertTrue(recovered.first!![0].x < 0.20f)
+    }
     @Test
     fun `outer document beats a small high-contrast form cell`() {
         val internalCell = ScannerTuning.outerPagePriority(0.79f, 0.09f, 0.0)

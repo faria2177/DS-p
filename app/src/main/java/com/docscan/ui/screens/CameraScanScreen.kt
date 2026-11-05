@@ -119,6 +119,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
@@ -156,7 +157,6 @@ import com.docscan.data.model.ScannerFeatureMode
 import com.docscan.ui.components.CreateQrBottomSheet
 import com.docscan.ui.components.GalleryCodeSelectionDialog
 import com.docscan.ui.components.IdCardIntroOverlay
-import com.docscan.ui.components.ModernScanModeSwitcher
 import com.docscan.ui.components.QrContinuousScanBar
 import com.docscan.ui.components.QrHistoryBottomSheet
 import com.docscan.ui.components.QrResultBottomSheet
@@ -173,7 +173,6 @@ import com.docscan.util.DetectionState
 import com.docscan.util.FileUtils
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -209,7 +208,6 @@ fun CameraScanScreen(
     val scanMode by viewModel.scanMode.collectAsStateWithLifecycle()
     val activeFeatureMode by viewModel.activeFeatureMode.collectAsStateWithLifecycle()
     val capturedPages by viewModel.capturedPages.collectAsStateWithLifecycle()
-    val isAutoCaptureEnabled by viewModel.isAutoCaptureEnabled.collectAsStateWithLifecycle()
     val isMagicEnhanceEnabled by viewModel.isMagicEnhanceEnabled.collectAsStateWithLifecycle()
     val isHdModeEnabled by viewModel.isHdModeEnabled.collectAsStateWithLifecycle()
     val isAutoCropEnabled by viewModel.isAutoCropEnabled.collectAsStateWithLifecycle()
@@ -291,7 +289,6 @@ fun CameraScanScreen(
 
     // Shutter flash visual feedback
     val flashAnim = remember { Animatable(0f) }
-    val lastAutoCaptureTime = remember { mutableStateOf(0L) }
 
     // Dedicated Single-Image Gallery Import for QR/Barcode scanning
     val qrGalleryLauncher = rememberLauncherForActivityResult(
@@ -477,18 +474,6 @@ fun CameraScanScreen(
         )
     }
 
-    // Auto-capture watcher when document remains stable
-    LaunchedEffect(detectedState, isAutoCaptureEnabled) {
-        if (isAutoCaptureEnabled && detectedState == DetectionState.DOCUMENT_STABLE && !isShutterBusy && !isProcessing) {
-            val now = System.currentTimeMillis()
-            if (now - lastAutoCaptureTime.value > 2500) {
-                lastAutoCaptureTime.value = now
-                delay(300) // Brief stability confirmation delay
-                capturePhoto()
-            }
-        }
-    }
-
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) {
         onDispose {
@@ -661,6 +646,7 @@ fun CameraScanScreen(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
+                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                         scaleType = PreviewView.ScaleType.FILL_CENTER
                         previewViewRef = this
                     }
@@ -795,15 +781,37 @@ fun CameraScanScreen(
                     }
                 }
             } else if (!isNidCaptureMode) {
-                ModernScanModeSwitcher(
-                    selectedMode = mainScanMode,
-                    onModeSelected = { newMode ->
-                        viewModel.mainScanMode.value = newMode
-                    },
+                // Document scanning has its own camera. QR & Barcode remains
+                // available from Tools -> Scan Code, not this scan toolbar.
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                )
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        color = ScannerTeal
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.DocumentScanner,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                "Document",
+                                color = Color.Black,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
             }
 
             if (mainScanMode == MainScanMode.DOCUMENT) {
@@ -840,11 +848,8 @@ fun CameraScanScreen(
                         onHdClick = {
                             viewModel.isHdModeEnabled.value = !isHdModeEnabled
                         },
-                        isAutoCaptureOn = isAutoCaptureEnabled,
-                        onAutoScanClick = {
-                            viewModel.isAutoCaptureEnabled.value = !isAutoCaptureEnabled
-                        },
-                        onMoreClick = { showMoreMenu = true }
+                        onMoreClick = { showMoreMenu = true },
+                        modifier = Modifier.padding(bottom = 12.dp)
                     )
                 }
 
@@ -871,23 +876,6 @@ fun CameraScanScreen(
                                 }
                             },
                             onClick = { viewModel.showGridGuidelines.value = !showGridGuidelines }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("Auto Capture", color = Color.White, fontSize = 14.sp)
-                                    Switch(
-                                        checked = isAutoCaptureEnabled,
-                                        onCheckedChange = { viewModel.isAutoCaptureEnabled.value = it },
-                                        colors = SwitchDefaults.colors(checkedThumbColor = ScannerTeal, checkedTrackColor = ScannerTeal.copy(alpha = 0.5f))
-                                    )
-                                }
-                            },
-                            onClick = { viewModel.isAutoCaptureEnabled.value = !isAutoCaptureEnabled }
                         )
                         DropdownMenuItem(
                             text = {
@@ -938,6 +926,7 @@ fun CameraScanScreen(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        .clipToBounds()
                 ) {
                     if (hasCameraPermission && useDocumentViewfinder) {
                         // Camera and quadrilateral use the identical center
@@ -953,6 +942,10 @@ fun CameraScanScreen(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.MATCH_PARENT
                                     )
+                                    // TextureView respects Compose's clip and
+                                    // prevents camera surface from covering the
+                                    // bottom half of the top toolbar.
+                                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                                     scaleType = PreviewView.ScaleType.FILL_CENTER
                                     previewViewRef = this
                                 }
@@ -1020,7 +1013,7 @@ fun CameraScanScreen(
                         val guideInfo = when {
                             detectedState == DetectionState.DOCUMENT_STABLE -> {
                                 AlignmentGuideInfo(
-                                    if (isAutoCaptureEnabled) "Document Aligned • Capturing..." else "Document Aligned ✓ Ready",
+                                    "Document Aligned ✓ Ready",
                                     Icons.Default.Check,
                                     Color(0xFF28D8A1).copy(alpha = 0.95f),
                                     Color.White,
@@ -1089,11 +1082,9 @@ fun CameraScanScreen(
                 if (isNidCaptureMode) {
                     NidReferenceBottomControls(
                         isShutterBusy = isShutterBusy || isProcessing,
-                        isAutoCaptureEnabled = isAutoCaptureEnabled,
                         idCardStep = idCardStep,
                         onGalleryClick = { galleryLauncher.launch("image/*") },
                         onShutterClick = { capturePhoto() },
-                        onAutoCaptureChange = { enabled -> viewModel.isAutoCaptureEnabled.value = enabled },
                         modifier = Modifier
                             .fillMaxWidth()
                             .windowInsetsPadding(WindowInsets.navigationBars)
@@ -1494,21 +1485,16 @@ fun NidReferenceViewfinder(
 }
 
 /**
- * Dedicated NID bottom deck: gallery, large shutter and Manual/Auto capture switch.
- * Auto capture starts OFF whenever NID mode is entered, but can be enabled here.
+ * Dedicated NID bottom deck: gallery and manual shutter.
  */
 @Composable
 fun NidReferenceBottomControls(
     isShutterBusy: Boolean,
-    isAutoCaptureEnabled: Boolean,
     idCardStep: Int,
     onGalleryClick: () -> Unit,
     onShutterClick: () -> Unit,
-    onAutoCaptureChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val blue = Color(0xFF29BFF4)
-
     Surface(
         color = Color(0xF20B0D10),
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -1571,50 +1557,7 @@ fun NidReferenceBottomControls(
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
-
-            Surface(
-                shape = RoundedCornerShape(28.dp),
-                color = Color(0xFF17191D),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        shape = RoundedCornerShape(26.dp),
-                        color = if (!isAutoCaptureEnabled) Color(0xFF2A2D31) else Color.Transparent,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(26.dp))
-                            .clickable { onAutoCaptureChange(false) }
-                    ) {
-                        Text(
-                            "Manual",
-                            color = if (!isAutoCaptureEnabled) Color.White else Color(0xFFD1D5DB),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp)
-                        )
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(26.dp),
-                        color = if (isAutoCaptureEnabled) Color(0xFF102A39) else Color.Transparent,
-                        border = if (isAutoCaptureEnabled) androidx.compose.foundation.BorderStroke(1.5.dp, blue) else null,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(26.dp))
-                            .clickable { onAutoCaptureChange(true) }
-                    ) {
-                        Text(
-                            "Auto capture",
-                            color = if (isAutoCaptureEnabled) blue else Color(0xFFD1D5DB),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier
@@ -1655,8 +1598,6 @@ fun ScannerTopBar(
     onFlashClick: () -> Unit,
     onMagicEnhanceClick: () -> Unit,
     onHdClick: () -> Unit,
-    isAutoCaptureOn: Boolean,
-    onAutoScanClick: (() -> Unit)? = null,
     onMoreClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1682,37 +1623,6 @@ fun ScannerTopBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // In-app automatic capture control using CameraX and OpenCV.
-            if (onAutoScanClick != null) {
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = if (isAutoCaptureOn) Color(0xAA00BFA5) else Color(0x77000000),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ScannerTealBright.copy(alpha = 0.8f)),
-                    modifier = Modifier
-                        .height(36.dp)
-                        .clickable { onAutoScanClick() }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.DocumentScanner,
-                            contentDescription = "Toggle automatic document capture",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            if (isAutoCaptureOn) "Auto On" else "Auto",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-            }
-
             // Flash Toggle
             IconButton(
                 onClick = onFlashClick,

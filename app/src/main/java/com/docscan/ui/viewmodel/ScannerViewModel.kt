@@ -274,7 +274,8 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         isQrOnlyMode.value = false
         activeScannedBarcode.value = null
         isAutoCropEnabled.value = ScanPreferences.autoAdjustBorders(context)
-        isAutoCaptureEnabled.value = true
+        // Capture is always manual. Edge detection and automatic cropping stay enabled.
+        isAutoCaptureEnabled.value = false
         isMagicEnhanceEnabled.value = true
         sessionDocumentTitle.value = ScanPreferences.newDocumentTitle(context)
     }
@@ -285,9 +286,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         selectedIdCardType.value = IdCardType.ID_CARD
         showIdCardIntro.value = false
 
-        // Every NID session starts clean and manual, matching the dedicated
-        // CameraX NID capture screen. Auto capture remains available as an
-        // explicit user-controlled toggle on that screen.
+        // Every NID session starts clean and remains manual.
         capturedPages.value = emptyList()
         idCardFront.value = null
         idCardBack.value = null

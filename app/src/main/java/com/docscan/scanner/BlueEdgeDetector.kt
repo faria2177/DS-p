@@ -71,6 +71,8 @@ object BlueEdgeDetector {
         private var consecutiveValidHits = 0
         private var acquisitionMissFrames = 0
         private var pendingCorners: List<Offset>? = null
+        private var pendingRelocation: List<Offset>? = null
+        private var pendingRelocationHits = 0
         private const val REQUIRED_HITS_TO_OPEN = 2 // Quick lock within 2 frames
         private const val MAX_ACQUISITION_GAP = 2 // A faint border may vanish on alternating frames
         private const val MAX_GRACE_FRAMES = 12      // Bridge short focus / motion blur without box flicker
@@ -93,6 +95,8 @@ object BlueEdgeDetector {
             consecutiveValidHits = 0
             acquisitionMissFrames = 0
             pendingCorners = null
+            pendingRelocation = null
+            pendingRelocationHits = 0
             for (i in 0..3) {
                 initialized[i] = false
                 xPrev[i] = 0f
@@ -109,6 +113,8 @@ object BlueEdgeDetector {
 
             val minConfidenceToAccept = if (trackCount > 0) 0.36f else 0.40f
             if (newCorners == null || confidence < minConfidenceToAccept || newCorners.size != 4) {
+                pendingRelocation = null
+                pendingRelocationHits = 0
                 // A genuine paper border can be detected only every other
                 // analysis frame on textured desks or under moving shadows.
                 // Keep the *pending* shape briefly, without displaying it,
@@ -154,19 +160,34 @@ object BlueEdgeDetector {
                 newCorners
             }
 
-            // Permit a newly found enclosing paper boundary to replace a smaller
-            // printed form cell immediately. Other drastic jumps still require
-            // higher confidence so the outline does not jump to nearby objects.
+            // Upgrade an inner printed form to its enclosing sheet immediately.
+            // But a sudden jump to an inner box or unrelated object must be
+            // confirmed over several frames: accepting one high-confidence
+            // spurious contour caused the live outline to flicker wildly.
             if (currentLast != null && trackCount >= 4 &&
                 isDrasticJump(currentLast, alignedCorners)) {
                 val outerPageUpgrade = isOutwardExpansion(currentLast, alignedCorners)
-                if (!outerPageUpgrade && confidence < 0.65f) {
-                    return Pair(smoothedCorners, true)
-                }
                 if (outerPageUpgrade) {
+                    for (i in initialized.indices) initialized[i] = false
+                } else {
+                    val previousProposal = pendingRelocation
+                    val matchesProposal = previousProposal != null &&
+                        alignToPreviousCorners(previousProposal, alignedCorners)
+                            .zip(previousProposal).all { (a, b) ->
+                                hypot(a.x - b.x, a.y - b.y) < 0.075f
+                            }
+                    pendingRelocationHits = if (matchesProposal) pendingRelocationHits + 1 else 1
+                    pendingRelocation = alignedCorners
+                    val requiredHits = if (confidence >= 0.65f) 3 else 4
+                    if (pendingRelocationHits < requiredHits) {
+                        return Pair(smoothedCorners, true)
+                    }
+                    // This is a real moved document, not a one-frame glitch.
                     for (i in initialized.indices) initialized[i] = false
                 }
             }
+            pendingRelocation = null
+            pendingRelocationHits = 0
 
             // Deadband stillness check: If camera is steady, completely freeze coordinates (zero micro-jitter)
             val currentSmooth = smoothedCorners
