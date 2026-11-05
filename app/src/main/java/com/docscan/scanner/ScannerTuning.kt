@@ -129,6 +129,18 @@ object ScannerTuning {
         areaRatio < 0.14f && signedPaperContrast < 6.0 &&
             absoluteBoundaryContrast < 16.0
 
+    /** A large, brighter paper region can have faint Canny edges in soft light. */
+    fun isSoftWhitePaperBoundary(
+        areaRatio: Float,
+        signedPaperContrast: Double,
+        absoluteBoundaryContrast: Double,
+        supportedSides: Int,
+        averageEdgeSupport: Double
+    ): Boolean = areaRatio >= 0.20f &&
+        signedPaperContrast >= 7.0 &&
+        absoluteBoundaryContrast >= 6.0 &&
+        supportedSides >= 1 && averageEdgeSupport >= 0.055
+
     /** Prefer actual full-sheet contours to smaller, high-contrast form cells. */
     fun outerPagePriority(confidence: Float, areaRatio: Float, signedPaperContrast: Double): Float {
         val area = areaRatio.coerceIn(0f, 1f)

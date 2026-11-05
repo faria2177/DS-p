@@ -69,7 +69,10 @@ object BlueEdgeDetector {
         private var trackCount = 0
         private var lostGraceFrames = 0
         private var consecutiveValidHits = 0
+        private var acquisitionMissFrames = 0
+        private var pendingCorners: List<Offset>? = null
         private const val REQUIRED_HITS_TO_OPEN = 2 // Quick lock within 2 frames
+        private const val MAX_ACQUISITION_GAP = 2 // A faint border may vanish on alternating frames
         private const val MAX_GRACE_FRAMES = 12      // Bridge short focus / motion blur without box flicker
         private const val DEADBAND_THRESHOLD = 0.006f // Ignore sub-pixel/noisy corner shifts at rest
 
@@ -88,6 +91,8 @@ object BlueEdgeDetector {
             trackCount = 0
             lostGraceFrames = 0
             consecutiveValidHits = 0
+            acquisitionMissFrames = 0
+            pendingCorners = null
             for (i in 0..3) {
                 initialized[i] = false
                 xPrev[i] = 0f
@@ -102,9 +107,17 @@ object BlueEdgeDetector {
         fun updateAndSmooth(newCorners: List<Offset>?, confidence: Float): Pair<List<Offset>?, Boolean> {
             val now = System.nanoTime()
 
-            val minConfidenceToAccept = if (trackCount > 0) 0.36f else 0.42f
+            val minConfidenceToAccept = if (trackCount > 0) 0.36f else 0.40f
             if (newCorners == null || confidence < minConfidenceToAccept || newCorners.size != 4) {
-                consecutiveValidHits = 0
+                // A genuine paper border can be detected only every other
+                // analysis frame on textured desks or under moving shadows.
+                // Keep the *pending* shape briefly, without displaying it,
+                // so the next agreeing frame can open the box.
+                if (trackCount == 0 && pendingCorners != null &&
+                    acquisitionMissFrames < MAX_ACQUISITION_GAP) {
+                    acquisitionMissFrames++
+                    return Pair(null, false)
+                }
                 // If we recently tracked a valid quad, allow grace period for brief motion blur or hand adjustments
                 if (smoothedCorners != null && lostGraceFrames < MAX_GRACE_FRAMES && trackCount >= 2) {
                     lostGraceFrames++
@@ -115,11 +128,21 @@ object BlueEdgeDetector {
             }
 
             // A candidate was detected in this frame
-            consecutiveValidHits++
-            // If starting fresh from an empty screen, require 2 consecutive frames before opening the box
-            if (trackCount == 0 && consecutiveValidHits < REQUIRED_HITS_TO_OPEN) {
-                return Pair(null, false)
+            if (trackCount == 0) {
+                val pending = pendingCorners
+                val isSamePaper = pending != null &&
+                    alignToPreviousCorners(pending, newCorners).zip(pending).all { (a, b) ->
+                        hypot(a.x - b.x, a.y - b.y) < 0.16f
+                    }
+                consecutiveValidHits = if (isSamePaper) consecutiveValidHits + 1 else 1
+                pendingCorners = newCorners
+                acquisitionMissFrames = 0
+                if (consecutiveValidHits < REQUIRED_HITS_TO_OPEN) {
+                    return Pair(null, false)
+                }
             }
+            pendingCorners = null
+            consecutiveValidHits = 0
 
             lostGraceFrames = 0
             val currentLast = lastAcceptedCorners
@@ -594,7 +617,13 @@ object BlueEdgeDetector {
                     (avgSideSupport >= 0.22) ||
                     // Full pages can have two faint borders against white paper.
                     (qArea >= 0.24f && sidesAboveMin >= 2 &&
-                     avgSideSupport >= 0.10 && paperContrast >= 3.0)
+                     avgSideSupport >= 0.10 && paperContrast >= 3.0) ||
+                    // White sheets on a light wooden table are frequently
+                    // low-Canny-edge despite their real brightness boundary.
+                    ScannerTuning.isSoftWhitePaperBoundary(
+                        qArea, paperContrast, boundaryContrast,
+                        sidesAboveMin, avgSideSupport
+                    )
             if (!isEdgeSupported) return
 
             // Thin printed form boxes lack a consistently brighter interior.
@@ -660,7 +689,7 @@ object BlueEdgeDetector {
                 Imgproc.threshold(macroBlur, macroOtsu, 0.0, 255.0, Imgproc.THRESH_BINARY or Imgproc.THRESH_OTSU)
                 Imgproc.morphologyEx(macroOtsu, macroOtsu, Imgproc.MORPH_CLOSE, kMacroClose)
 
-                extractContoursAndQuads(macroOtsu, frameArea) { quad ->
+                extractContoursAndQuads(macroOtsu, frameArea, retrievalMode = Imgproc.RETR_LIST) { quad ->
                     testAndRecordCandidate(quad, passWeight = 1.15f)
                 }
             } finally {
@@ -678,7 +707,7 @@ object BlueEdgeDetector {
                 Imgproc.threshold(macroBlurInv, macroOtsuInv, 0.0, 255.0, Imgproc.THRESH_BINARY_INV or Imgproc.THRESH_OTSU)
                 Imgproc.morphologyEx(macroOtsuInv, macroOtsuInv, Imgproc.MORPH_CLOSE, kMacroCloseInv)
 
-                extractContoursAndQuads(macroOtsuInv, frameArea) { quad ->
+                extractContoursAndQuads(macroOtsuInv, frameArea, retrievalMode = Imgproc.RETR_LIST) { quad ->
                     testAndRecordCandidate(quad, passWeight = 1.10f)
                 }
             } finally {
@@ -978,11 +1007,14 @@ object BlueEdgeDetector {
     /**
      * Extracts contours and evaluates 4-corner candidates using multi-epsilon poly approximation,
      * thumb/finger occlusion recovery via dominant quad simplification, and convex hull bounding.
-     * Uses RETR_EXTERNAL so internal tables and text inside the paper are never treated as outer boundaries.
+     * The macro-luminance passes can request RETR_LIST to preserve a sheet
+     * boundary when its background touches the image border. Other passes
+     * retain RETR_EXTERNAL to avoid unnecessary inner-text work each frame.
      */
     private fun extractContoursAndQuads(
         edgeOrBinaryMat: Mat,
         frameArea: Double,
+        retrievalMode: Int = Imgproc.RETR_EXTERNAL,
         onCandidateFound: (Array<Point>) -> Unit
     ) {
         val contours = ArrayList<MatOfPoint>()
@@ -990,7 +1022,7 @@ object BlueEdgeDetector {
         try {
             Imgproc.findContours(
                 edgeOrBinaryMat, contours, hierarchy,
-                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
+                retrievalMode, Imgproc.CHAIN_APPROX_SIMPLE
             )
             if (contours.isEmpty()) return
 

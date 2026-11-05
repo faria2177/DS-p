@@ -38,6 +38,33 @@ class PremiumQuadTrackerTest {
     }
 
     @Test
+    fun `paper can lock despite one intermittent missing detection frame`() {
+        val tracker = BlueEdgeDetector.PremiumQuadTracker
+        assertFalse(tracker.updateAndSmooth(quad, 0.52f).second)
+        assertFalse(tracker.updateAndSmooth(null, 0f).second)
+        assertTrue(tracker.updateAndSmooth(quad, 0.52f).second)
+    }
+
+    @Test
+    fun `unrelated paper shape cannot complete a pending lock`() {
+        val tracker = BlueEdgeDetector.PremiumQuadTracker
+        val elsewhere = listOf(
+            Offset(0.38f, 0.28f), Offset(0.78f, 0.28f),
+            Offset(0.78f, 0.76f), Offset(0.38f, 0.76f)
+        )
+        assertFalse(tracker.updateAndSmooth(quad, 0.8f).second)
+        assertFalse(tracker.updateAndSmooth(null, 0f).second)
+        assertFalse(tracker.updateAndSmooth(elsewhere, 0.8f).second)
+    }
+
+    @Test
+    fun `bright full sheet survives weak borders but inner printed frame does not`() {
+        assertTrue(ScannerTuning.isSoftWhitePaperBoundary(0.46f, 15.0, 12.0, 1, 0.085))
+        assertFalse(ScannerTuning.isSoftWhitePaperBoundary(0.08f, 0.0, 15.0, 4, 0.30))
+        assertFalse(ScannerTuning.isSoftWhitePaperBoundary(0.46f, 0.5, 2.0, 1, 0.08))
+    }
+
+    @Test
     fun `stale corners have bounded preview grace and can be reset`() {
         val tracker = BlueEdgeDetector.PremiumQuadTracker
 
