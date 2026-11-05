@@ -160,6 +160,17 @@ object BlueEdgeDetector {
                 newCorners
             }
 
+            // A contour can temporarily latch onto one printed line, making
+            // exactly one corner collapse toward the middle of a steady page.
+            // This is not a physical camera/paper translation: hold the last
+            // real quad instead of letting the filter grow a diagonal side.
+            if (currentLast != null && trackCount >= 2 &&
+                isIsolatedCornerWarp(currentLast, alignedCorners)) {
+                pendingRelocation = null
+                pendingRelocationHits = 0
+                return Pair(smoothedCorners, true)
+            }
+
             // Upgrade an inner printed form to its enclosing sheet immediately.
             // But a sudden jump to an inner box or unrelated object must be
             // confirmed over several frames: accepting one high-confidence
@@ -322,6 +333,14 @@ object BlueEdgeDetector {
             }
             val maxDist = (0..3).maxOf { sqrt(dxs[it] * dxs[it] + dys[it] * dys[it]) }
             return maxDist > 0.25f || maxDeformation > 0.12f
+        }
+
+        private fun isIsolatedCornerWarp(old: List<Offset>, new: List<Offset>): Boolean {
+            val movements = old.indices.map { i ->
+                hypot(new[i].x - old[i].x, new[i].y - old[i].y)
+            }.sortedDescending()
+            return movements.size == 4 && movements[0] >= 0.085f &&
+                movements[1] <= 0.035f
         }
 
         private fun isOutwardExpansion(previous: List<Offset>, candidate: List<Offset>): Boolean {
@@ -600,6 +619,8 @@ object BlueEdgeDetector {
             // Check 2: Convexity & basic geometry
             val geom = Corner.evaluateGeometry(ordered)
             if (!geom.isConvex || geom.score < 0.32) return
+            val minInteriorAngle = ScannerTuning.minInteriorAngleDegrees(ordered)
+            if (minInteriorAngle < 48.0) return
 
             // Check 3: Area must be between 3.5% and 98.5% of viewfinder
             val qArea = computeQuadAreaNorm(ordered, wW, wH)
@@ -651,6 +672,17 @@ object BlueEdgeDetector {
             if (boundaryContrast < ScannerTuning.MIN_BOUNDARY_CONTRAST &&
                 avgSideSupport < 0.24 && paperContrast < 3.0) return
 
+            // The old average-only scoring accepted large quadrilaterals with
+            // a fourth side running diagonally THROUGH a blank sheet. Test
+            // each physical border, after the cheap filters to limit overhead.
+            val sidePaperContrast = ScannerTuning.sidePaperBoundaryPolarity(grayMat, ordered)
+            if (!ScannerTuning.hasPhysicalFourSideBoundary(
+                    perSide, sidePaperContrast, minInteriorAngle, qArea
+                )) return
+            val strongPhysicalSides = perSide.indices.count { side ->
+                perSide[side] >= 0.065 || abs(sidePaperContrast[side]) >= 6.0
+            }
+
             val geoScore = geom.score.toFloat().coerceIn(0f, 1f)
             val areaScore = when {
                 qArea in 0.20f..0.85f -> 1.0f
@@ -670,7 +702,8 @@ object BlueEdgeDetector {
                 0.32f * avgSideSupport.toFloat().coerceIn(0f, 1f) +
                 0.15f * areaScore +
                 0.14f * aspectScore +
-                0.15f * boundaryScore
+                0.15f * boundaryScore +
+                0.015f * strongPhysicalSides
             ).coerceIn(0f, 1f) * passWeight +
                 (paperContrast / 35.0).coerceIn(0.0, 1.0).toFloat() * 0.12f
             ).coerceIn(0f, 1f)
@@ -862,13 +895,25 @@ object BlueEdgeDetector {
         // Sub-pixel refine corners on Canny edge map for razor sharp alignment
         val edgeMap = Mat()
         Imgproc.Canny(grayMat, edgeMap, 35.0, 115.0)
-        val refinedPts = try {
+        val proposedRefinement = try {
             CornerRefiner.refineCorners(grayMat = grayMat, edgeMat = edgeMap, quad = best.rawPts)
         } catch (_: Throwable) {
             best.rawPts
         } finally {
             edgeMap.release()
         }
+
+        // Refinement must not rotate corner indices or turn a valid page into
+        // a heavily distorted polygon. Use the already-validated contour if
+        // the corner optimizer cannot preserve its shape and correspondence.
+        val maxCornerDrift = hypot(wW.toDouble(), wH.toDouble()) * 0.032
+        val refinementSafe = proposedRefinement.size == 4 &&
+            proposedRefinement.indices.all { i ->
+                dist(proposedRefinement[i], best.rawPts[i]) <= maxCornerDrift
+            } &&
+            Corner.evaluateGeometry(proposedRefinement).isConvex &&
+            ScannerTuning.minInteriorAngleDegrees(proposedRefinement) >= 48.0
+        val refinedPts = if (refinementSafe) proposedRefinement else best.rawPts
 
         val normCorners = refinedPts.map {
             Offset(

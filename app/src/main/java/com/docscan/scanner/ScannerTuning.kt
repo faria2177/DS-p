@@ -5,6 +5,7 @@ package com.docscan.scanner
 import org.opencv.core.Mat
 import org.opencv.core.Point
 import kotlin.math.abs
+import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -115,6 +116,92 @@ object ScannerTuning {
             }
         }
         return if (count == 0) 0.0 else sum / count
+    }
+
+    /**
+     * Signed luminance evidence for EACH side separately. An average over all
+     * four sides can hide a completely imaginary diagonal cutting across the
+     * blank middle of a sheet (three real borders still score highly).
+     */
+    fun sidePaperBoundaryPolarity(gray: Mat, q: Array<Point>): DoubleArray {
+        val result = DoubleArray(4)
+        if (gray.empty() || q.size != 4) return result
+        val cx = q.sumOf { it.x } / 4.0
+        val cy = q.sumOf { it.y } / 4.0
+        val step = (min(gray.width(), gray.height()) * 0.018).coerceIn(4.0, 14.0)
+        for (i in 0..3) {
+            val a = q[i]
+            val b = q[(i + 1) % 4]
+            val mx = (a.x + b.x) / 2.0
+            val my = (a.y + b.y) / 2.0
+            val length = hypot(cx - mx, cy - my).coerceAtLeast(1.0)
+            val nx = (cx - mx) / length
+            val ny = (cy - my) / length
+            val differences = mutableListOf<Double>()
+            for (t in doubleArrayOf(0.20, 0.35, 0.50, 0.65, 0.80)) {
+                val px = a.x + (b.x - a.x) * t
+                val py = a.y + (b.y - a.y) * t
+                val inside = sample(gray, px + nx * step, py + ny * step)
+                val outside = sample(gray, px - nx * step, py - ny * step)
+                if (inside != null && outside != null) differences.add(inside - outside)
+            }
+            // The median is resistant to a word, pen or shadow crossing one sample.
+            result[i] = differences.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
+        }
+        return result
+    }
+
+    /** Minimum interior angle; rules out severely pinched quadrilaterals. */
+    fun minInteriorAngleDegrees(q: Array<Point>): Double {
+        if (q.size != 4) return 0.0
+        var minimum = 180.0
+        for (i in 0..3) {
+            val p = q[i]
+            val prev = q[(i + 3) % 4]
+            val next = q[(i + 1) % 4]
+            val ax = prev.x - p.x
+            val ay = prev.y - p.y
+            val bx = next.x - p.x
+            val by = next.y - p.y
+            val cross = abs(ax * by - ay * bx)
+            val dot = ax * bx + ay * by
+            minimum = min(minimum, Math.toDegrees(atan2(cross, dot)))
+        }
+        return minimum
+    }
+
+    /**
+     * A proposed page must have a physical boundary on each side (or three
+     * strong sides with a convincing almost-rectangular fourth). This prevents
+     * the scanner from drawing a diagonal across a blank white paper.
+     */
+    fun hasPhysicalFourSideBoundary(
+        edgeSupport: DoubleArray,
+        signedSideContrast: DoubleArray,
+        minimumAngleDegrees: Double,
+        areaRatio: Float
+    ): Boolean {
+        if (edgeSupport.size != 4 || signedSideContrast.size != 4 ||
+            minimumAngleDegrees < 48.0 || !minimumAngleDegrees.isFinite()) return false
+        var strongSides = 0
+        var faintSides = 0
+        for (i in 0..3) {
+            val edge = edgeSupport[i]
+            val contrast = abs(signedSideContrast[i])
+            if (edge >= 0.065 || contrast >= 6.0) strongSides++
+            if (edge >= 0.028 || contrast >= 3.0) faintSides++
+        }
+        return when {
+            strongSides == 4 -> true
+            strongSides >= 3 && faintSides == 4 && minimumAngleDegrees >= 59.0 -> true
+            // One glare-obscured side is reasonable only for a well-aligned
+            // large sheet. Never allow a skewed diagonal with no real edge.
+            strongSides >= 3 && minimumAngleDegrees >= 78.0 && areaRatio >= 0.20f -> true
+            // White-on-white paper can have four faint but genuine borders.
+            // Preserve detection when evidence exists on EVERY side.
+            faintSides == 4 && minimumAngleDegrees >= 80.0 && areaRatio >= 0.25f -> true
+            else -> false
+        }
     }
 
     /**

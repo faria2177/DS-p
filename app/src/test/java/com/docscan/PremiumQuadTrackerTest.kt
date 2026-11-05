@@ -3,6 +3,7 @@ package com.docscan
 import androidx.compose.ui.geometry.Offset
 import com.docscan.scanner.BlueEdgeDetector
 import com.docscan.scanner.ScannerTuning
+import org.opencv.core.Point
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -118,6 +119,64 @@ class PremiumQuadTrackerTest {
         val recovered = tracker.updateAndSmooth(quad, 0.92f)
         assertTrue(recovered.second)
         assertTrue(recovered.first!![0].x < 0.20f)
+    }
+
+    @Test
+    fun `three real paper borders must not validate an imaginary diagonal`() {
+        // Reproduces the four vertices shown in the user's live camera image:
+        // the proposed bottom edge cuts across the white paper, missing BR.
+        val skewed = arrayOf(
+            Point(125.0, 370.0), Point(702.0, 378.0),
+            Point(607.0, 787.0), Point(90.0, 1084.0)
+        )
+        val minimumAngle = ScannerTuning.minInteriorAngleDegrees(skewed)
+        assertTrue(minimumAngle < 60.0)
+        assertFalse(
+            ScannerTuning.hasPhysicalFourSideBoundary(
+                doubleArrayOf(0.24, 0.19, 0.008, 0.21),
+                doubleArrayOf(22.0, 18.0, 0.5, 20.0),
+                minimumAngle,
+                0.51f
+            )
+        )
+    }
+
+    @Test
+    fun `subtle white page boundary can still pass with a faint fourth side`() {
+        val almostRectangular = arrayOf(
+            Point(90.0, 80.0), Point(580.0, 85.0),
+            Point(590.0, 790.0), Point(80.0, 785.0)
+        )
+        assertTrue(
+            ScannerTuning.hasPhysicalFourSideBoundary(
+                doubleArrayOf(0.15, 0.12, 0.02, 0.19),
+                doubleArrayOf(15.0, 13.0, 1.0, 17.0),
+                ScannerTuning.minInteriorAngleDegrees(almostRectangular),
+                0.53f
+            )
+        )
+        assertFalse(
+            ScannerTuning.hasPhysicalFourSideBoundary(
+                doubleArrayOf(0.15, 0.02, 0.02, 0.19),
+                doubleArrayOf(15.0, 1.0, 1.0, 17.0),
+                ScannerTuning.minInteriorAngleDegrees(almostRectangular),
+                0.53f
+            )
+        )
+    }
+
+    @Test
+    fun `isolated corner warp cannot produce a diagonal in steady tracked sheet`() {
+        val tracker = BlueEdgeDetector.PremiumQuadTracker
+        repeat(5) { tracker.updateAndSmooth(quad, 0.90f) }
+        val isolatedWarp = quad.toMutableList().apply {
+            this[2] = Offset(0.88f, 0.56f)
+        }
+        repeat(6) {
+            val held = tracker.updateAndSmooth(isolatedWarp, 0.92f)
+            assertTrue(held.second)
+            assertTrue("BR must stay near the physical bottom right corner", held.first!![2].y > 0.80f)
+        }
     }
     @Test
     fun `outer document beats a small high-contrast form cell`() {
