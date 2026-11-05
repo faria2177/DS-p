@@ -519,7 +519,8 @@ object BlueEdgeDetector {
         val rawPts: Array<Point>,
         val areaNorm: Float,
         val confidence: Float,
-        val signedPaperContrast: Double
+        val signedPaperContrast: Double,
+        val surfaceScore: Float
     )
 
     private fun detectFromYuv(
@@ -602,8 +603,10 @@ object BlueEdgeDetector {
         val highThresh = max(lowThresh + 28.0, median * 1.15).coerceIn(65.0, 180.0)
         Imgproc.Canny(claheMat, cannyEdgeMat, lowThresh, highThresh, 3, true)
         val cannyPixels = ByteArray(wW * wH * cannyEdgeMat.channels().coerceAtLeast(1))
+        val grayPixels = ByteArray(wW * wH)
         try {
             cannyEdgeMat.get(0, 0, cannyPixels)
+            grayMat.get(0, 0, grayPixels)
         } catch (_: Throwable) {}
 
         fun testAndRecordCandidate(ordered: Array<Point>, passWeight: Float = 1.0f) {
@@ -650,6 +653,9 @@ object BlueEdgeDetector {
             val sidesAboveMin = perSide.count { it >= 0.06 }
             val boundaryContrast = ScannerTuning.boundaryContrast(grayMat, ordered)
             val paperContrast = ScannerTuning.paperBoundaryPolarity(grayMat, ordered)
+            val surfaceScore = if (qArea >= 0.07f) {
+                ScannerTuning.pageSurfaceScore(grayPixels, wW, wH, ordered)
+            } else 0f
             if (ScannerTuning.isLikelyPrintedInnerFrame(qArea, paperContrast, boundaryContrast)) {
                 return
             }
@@ -665,6 +671,13 @@ object BlueEdgeDetector {
                     ScannerTuning.isSoftWhitePaperBoundary(
                         qArea, paperContrast, boundaryContrast,
                         sidesAboveMin, avgSideSupport
+                    ) ||
+                    // Grayish paper on a bright patterned table may be DARKER
+                    // than its background: texture separation, not polarity,
+                    // tells us whether it is a continuous physical sheet.
+                    ScannerTuning.isSoftLowTexturePageBoundary(
+                        qArea, paperContrast, boundaryContrast,
+                        sidesAboveMin, avgSideSupport, surfaceScore
                     )
             if (!isEdgeSupported) return
 
@@ -705,11 +718,13 @@ object BlueEdgeDetector {
                 0.15f * boundaryScore +
                 0.015f * strongPhysicalSides
             ).coerceIn(0f, 1f) * passWeight +
-                (paperContrast / 35.0).coerceIn(0.0, 1.0).toFloat() * 0.12f
+                ((if (surfaceScore >= 0.68f) abs(paperContrast) else paperContrast)
+                    / 35.0).coerceIn(0.0, 1.0).toFloat() * 0.12f +
+                (if (qArea >= 0.14f) 0.10f * surfaceScore else 0f)
             ).coerceIn(0f, 1f)
 
             if (confidence >= 0.40f) {
-                candidateList.add(InternalCandidate(ordered, qArea, confidence, paperContrast))
+                candidateList.add(InternalCandidate(ordered, qArea, confidence, paperContrast, surfaceScore))
             }
         }
 
@@ -851,6 +866,34 @@ object BlueEdgeDetector {
                 morphGradThresh.release()
                 kGrad.release()
             }
+
+            // --- PASS 8 (only when needed): texture-suppressed paper outline ---
+            // Decorative fabric creates thousands of short high-contrast
+            // edges. A median-blurred frame suppresses those tiny edges but
+            // preserves the long physical sides of a partly torn sheet.
+            if (candidateList.none { it.areaNorm >= 0.18f && it.surfaceScore >= 0.62f }) {
+                val medianGray = Mat()
+                val medianEdges = Mat()
+                val joinedEdges = Mat()
+                val closeKernel = Imgproc.getStructuringElement(
+                    Imgproc.MORPH_RECT, Size(7.0, 7.0)
+                )
+                try {
+                    Imgproc.medianBlur(grayMat, medianGray, 9)
+                    Imgproc.Canny(medianGray, medianEdges, 21.0, 67.0)
+                    Imgproc.morphologyEx(
+                        medianEdges, joinedEdges, Imgproc.MORPH_CLOSE, closeKernel
+                    )
+                    extractContoursAndQuads(
+                        joinedEdges, frameArea, retrievalMode = Imgproc.RETR_LIST
+                    ) { quad -> testAndRecordCandidate(quad, passWeight = 1.13f) }
+                } finally {
+                    medianGray.release()
+                    medianEdges.release()
+                    joinedEdges.release()
+                    closeKernel.release()
+                }
+            }
         } finally {
             claheMat.release()
             cannyEdgeMat.release()
@@ -863,7 +906,8 @@ object BlueEdgeDetector {
         // This eliminates any internal tables or text frames inside the paper.
         val outerCandidates = candidateList.filter { candA ->
             val isChildOfLarger = candidateList.any { candB ->
-                if (candB.areaNorm > candA.areaNorm * 1.25f) {
+                if (candB.areaNorm > candA.areaNorm * 1.25f &&
+                    candB.surfaceScore + 0.20f >= candA.surfaceScore) {
                     val centerA = Point(
                         (candA.rawPts[0].x + candA.rawPts[1].x + candA.rawPts[2].x + candA.rawPts[3].x) / 4.0,
                         (candA.rawPts[0].y + candA.rawPts[1].y + candA.rawPts[2].y + candA.rawPts[3].y) / 4.0
@@ -887,7 +931,9 @@ object BlueEdgeDetector {
         val pool = if (outerCandidates.isNotEmpty()) outerCandidates else candidateList
         // CamScanner priority: prefer outer boundary candidate with highest combined confidence + area prior
         val best = pool.maxByOrNull {
-            ScannerTuning.outerPagePriority(it.confidence, it.areaNorm, it.signedPaperContrast)
+            ScannerTuning.outerPagePriority(
+                it.confidence, it.areaNorm, it.signedPaperContrast, it.surfaceScore
+            )
         } ?: return null
 
         if (best.confidence < 0.40f) return null

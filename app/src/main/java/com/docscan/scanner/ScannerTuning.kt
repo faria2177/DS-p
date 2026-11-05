@@ -228,13 +228,115 @@ object ScannerTuning {
         absoluteBoundaryContrast >= 6.0 &&
         supportedSides >= 1 && averageEdgeSupport >= 0.055
 
+    /**
+     * A sheet on patterned cloth has a relatively quiet interior, while the
+     * cloth's glitter and printed decoration produce many short gradients.
+     * Evaluate a quadrilateral's INTERIOR instead of looking only at its four
+     * lines. Raw grayscale pixels avoid hundreds of per-candidate JNI calls.
+     * This is a soft ranking prior, not a hard ban on printed documents.
+     */
+    fun pageSurfaceScore(
+        grayPixels: ByteArray,
+        imageWidth: Int,
+        imageHeight: Int,
+        quad: Array<Point>
+    ): Float {
+        if (quad.size != 4 || imageWidth < 12 || imageHeight < 12 ||
+            grayPixels.size < imageWidth * imageHeight) return 0f
+
+        fun gradient(x: Double, y: Double): Double? {
+            val px = x.toInt()
+            val py = y.toInt()
+            if (px < 2 || px >= imageWidth - 2 ||
+                py < 2 || py >= imageHeight - 2) return null
+            fun luma(xx: Int, yy: Int): Int =
+                grayPixels[yy * imageWidth + xx].toInt() and 0xFF
+            val horizontal = abs(luma(px + 2, py) - luma(px - 2, py))
+            val vertical = abs(luma(px, py + 2) - luma(px, py - 2))
+            return (horizontal + vertical) / 2.0
+        }
+
+        fun median(values: List<Double>): Double =
+            if (values.isEmpty()) 0.0 else values.sorted()[values.size / 2]
+
+        val interiorGradients = ArrayList<Double>(49)
+        // Bilinear interpolation remains inside a rotated/perspective page.
+        for (vIndex in 1..7) {
+            val v = vIndex / 8.0
+            for (uIndex in 1..7) {
+                val u = uIndex / 8.0
+                val topX = quad[0].x * (1.0 - u) + quad[1].x * u
+                val topY = quad[0].y * (1.0 - u) + quad[1].y * u
+                val bottomX = quad[3].x * (1.0 - u) + quad[2].x * u
+                val bottomY = quad[3].y * (1.0 - u) + quad[2].y * u
+                gradient(topX * (1.0 - v) + bottomX * v,
+                    topY * (1.0 - v) + bottomY * v)?.let(interiorGradients::add)
+            }
+        }
+        if (interiorGradients.size < 24) return 0f
+
+        val cx = quad.sumOf { it.x } / 4.0
+        val cy = quad.sumOf { it.y } / 4.0
+        val exteriorGradients = ArrayList<Double>(16)
+        val outsideStep = (min(imageWidth, imageHeight) * 0.025).coerceIn(7.0, 16.0)
+        for (i in 0..3) {
+            val a = quad[i]
+            val b = quad[(i + 1) % 4]
+            val midpointX = (a.x + b.x) / 2.0
+            val midpointY = (a.y + b.y) / 2.0
+            val dx = midpointX - cx
+            val dy = midpointY - cy
+            val d = hypot(dx, dy).coerceAtLeast(1.0)
+            val nx = dx / d
+            val ny = dy / d
+            for (t in doubleArrayOf(0.2, 0.4, 0.6, 0.8)) {
+                val x = a.x + (b.x - a.x) * t + nx * outsideStep
+                val y = a.y + (b.y - a.y) * t + ny * outsideStep
+                gradient(x, y)?.let(exteriorGradients::add)
+            }
+        }
+
+        val insideTexture = median(interiorGradients)
+        val outsideTexture = if (exteriorGradients.size >= 4) {
+            median(exteriorGradients)
+        } else insideTexture
+        val smoothPage = ((26.0 - insideTexture) / 23.0).coerceIn(0.0, 1.0)
+        val materialSeparation = ((outsideTexture - insideTexture) / 22.0)
+            .coerceIn(0.0, 1.0)
+        return (0.78 * smoothPage + 0.22 * materialSeparation).toFloat()
+    }
+
+    /** Faint gray paper on brighter cloth must not be rejected for dark polarity. */
+    fun isSoftLowTexturePageBoundary(
+        areaRatio: Float,
+        signedPaperContrast: Double,
+        boundaryContrast: Double,
+        supportedSides: Int,
+        averageEdgeSupport: Double,
+        surfaceScore: Float
+    ): Boolean = areaRatio >= 0.15f && surfaceScore >= 0.68f &&
+        abs(signedPaperContrast) >= 4.0 && boundaryContrast >= 4.0 &&
+        supportedSides >= 1 && averageEdgeSupport >= 0.045
+
     /** Prefer actual full-sheet contours to smaller, high-contrast form cells. */
-    fun outerPagePriority(confidence: Float, areaRatio: Float, signedPaperContrast: Double): Float {
+    fun outerPagePriority(
+        confidence: Float,
+        areaRatio: Float,
+        signedPaperContrast: Double,
+        surfaceScore: Float = 0f
+    ): Float {
         val area = areaRatio.coerceIn(0f, 1f)
         val areaBonus = (kotlin.math.sqrt(area.toDouble()) * 0.55).toFloat().coerceAtMost(0.46f)
         val innerPenalty = if (area < 0.16f) 0.12f else 0f
-        val paperBonus = (signedPaperContrast / 32.0).coerceIn(0.0, 1.0).toFloat() * 0.22f
-        return confidence + areaBonus + paperBonus - innerPenalty
+        val materialContrast = if (surfaceScore >= 0.68f) {
+            abs(signedPaperContrast)
+        } else signedPaperContrast.coerceAtLeast(0.0)
+        val paperBonus = (materialContrast / 32.0).coerceIn(0.0, 1.0).toFloat() * 0.22f
+        // A smooth physical sheet should outrank a high-contrast decorative
+        // polygon, even when the decoration has stronger Canny edges.
+        val surfaceWeight = if (area >= 0.14f) 0.55f else 0.28f
+        return confidence + areaBonus + paperBonus - innerPenalty +
+            surfaceWeight * surfaceScore.coerceIn(0f, 1f)
     }
 
     private fun sample(gray: Mat, x: Double, y: Double): Double? {
