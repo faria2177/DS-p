@@ -645,6 +645,23 @@ fun CameraScanScreen(
                     }
                 }
             )
+
+            // The document outline must share the *same full-screen bounds*
+            // as PreviewView. Drawing it inside the weighted viewfinder panel
+            // (between the top and bottom controls) uses a different crop and
+            // makes correct detection coordinates look misplaced on screen.
+            if (mainScanMode == MainScanMode.DOCUMENT && !isNidCaptureMode) {
+                BlueEdgeOverlay(
+                    corners = detectedCorners,
+                    state = detectedState,
+                    scanMode = scanMode,
+                    idCardStep = idCardStep,
+                    idCardType = selectedIdCardType,
+                    showGrid = showGridGuidelines,
+                    frameAspectRatio = detectedFrameAspect,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         } else {
             // Permission fallback message
             Box(
@@ -922,17 +939,6 @@ fun CameraScanScreen(
                             NidReferenceViewfinder(
                                 state = detectedState,
                                 idCardStep = idCardStep,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            BlueEdgeOverlay(
-                                corners = detectedCorners,
-                                state = detectedState,
-                                scanMode = scanMode,
-                                idCardStep = idCardStep,
-                                idCardType = selectedIdCardType,
-                                showGrid = showGridGuidelines,
-                                frameAspectRatio = detectedFrameAspect,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }

@@ -21,6 +21,7 @@ import org.opencv.imgproc.Imgproc
 import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
@@ -997,7 +998,11 @@ object BlueEdgeDetector {
                 .take(14)
 
             for (contour in filtered) {
-                val c2f = MatOfPoint2f(*contour.toArray())
+                // OpenCV's toArray() allocates and copies the *entire* contour.
+                // Calling it once per hull vertex made large document outlines
+                // quadratic in work and could starve the next preview frame.
+                val contourPoints = contour.toArray()
+                val c2f = MatOfPoint2f(*contourPoints)
                 try {
                     val peri = Imgproc.arcLength(c2f, true)
 
@@ -1028,7 +1033,7 @@ object BlueEdgeDetector {
                         Imgproc.convexHull(contour, hullIndices)
                         val hullPoints = Array(hullIndices.rows()) { idx ->
                             val ptIndex = hullIndices.get(idx, 0)[0].toInt()
-                            contour.toArray()[ptIndex]
+                            contourPoints[ptIndex]
                         }
                         val hull2f = MatOfPoint2f(*hullPoints)
                         try {
@@ -1139,28 +1144,36 @@ object BlueEdgeDetector {
         val hist = IntArray(256)
         val maxSamples = 100_000
         val totalPixels = mat.rows() * mat.cols()
-        val step = max(1, sqrt(totalPixels.toDouble() / maxSamples).toInt())
-        val sampleW = max(1, mat.cols() / step)
-        val sampleH = max(1, mat.rows() / step)
-        val buf = ByteArray(sampleW * sampleH)
-        var bi = 0
-        var y = 0
-        while (y < mat.rows()) {
-            var x = 0
-            while (x < mat.cols()) {
-                buf[bi++] = mat.get(y, x)[0].toInt().toByte()
-                x += step
+        if (totalPixels <= 0) return 128.0
+
+        // ceil() keeps the number of samples bounded, including odd frame
+        // dimensions. The old floor-sized sample array could overflow when
+        // (width or height) % step != 0, aborting the entire live detection.
+        val step = medianSampleStep(mat.cols(), mat.rows(), maxSamples)
+        val rowPixels = ByteArray(mat.cols())
+        var sampleCount = 0
+        for (y in 0 until mat.rows() step step) {
+            mat.get(y, 0, rowPixels)
+            for (x in 0 until mat.cols() step step) {
+                hist[rowPixels[x].toInt() and 0xFF]++
+                sampleCount++
             }
-            y += step
         }
-        for (i in 0 until bi) hist[buf[i].toInt() and 0xFF]++
-        val mid = max(1, bi / 2)
+
+        val mid = (sampleCount + 1) / 2
         var total = 0
         for (i in hist.indices) {
             total += hist[i]
             if (total >= mid) return i.toDouble()
         }
         return 128.0
+    }
+
+    /** Sampling density independent of frame parity or camera sensor resolution. */
+    internal fun medianSampleStep(width: Int, height: Int, maxSamples: Int = 100_000): Int {
+        if (width <= 0 || height <= 0) return 1
+        val pixels = width.toDouble() * height.toDouble()
+        return ceil(sqrt(pixels / maxSamples.coerceAtLeast(1))).toInt().coerceAtLeast(1)
     }
 
     private fun dist(a: Point, b: Point): Double {
