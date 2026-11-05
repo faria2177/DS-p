@@ -48,12 +48,31 @@ class PremiumQuadTrackerTest {
 
         // Grace is bounded; a document must eventually disappear if no
         // fresh camera frame confirms the quad.
-        repeat(7) { assertTrue(tracker.updateAndSmooth(null, 0f).second) }
+        repeat(11) { assertTrue(tracker.updateAndSmooth(null, 0f).second) }
         assertFalse(tracker.updateAndSmooth(null, 0f).second)
 
         repeat(3) { tracker.updateAndSmooth(quad, 0.9f) }
         tracker.reset()
         assertFalse(tracker.updateAndSmooth(null, 0f).second)
+    }
+
+    @Test
+    fun `small repeated detection jitter leaves the locked corners steady`() {
+        val tracker = BlueEdgeDetector.PremiumQuadTracker
+        repeat(4) { tracker.updateAndSmooth(quad, 0.92f) }
+        val steady = tracker.updateAndSmooth(quad, 0.92f).first!!
+
+        // Roughly 4-5px at preview scale: larger than the previous threshold,
+        // yet too small to justify visible movement of a locked page outline.
+        val slightNoise = quad.map { Offset(it.x + 0.0045f, it.y + 0.001f) }
+        repeat(6) {
+            val result = tracker.updateAndSmooth(slightNoise, 0.91f)
+            assertTrue(result.second)
+            result.first!!.forEachIndexed { index, corner ->
+                org.junit.Assert.assertEquals(steady[index].x, corner.x, 0.0001f)
+                org.junit.Assert.assertEquals(steady[index].y, corner.y, 0.0001f)
+            }
+        }
     }
     @Test
     fun `outer document beats a small high-contrast form cell`() {

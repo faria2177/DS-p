@@ -70,8 +70,8 @@ object BlueEdgeDetector {
         private var lostGraceFrames = 0
         private var consecutiveValidHits = 0
         private const val REQUIRED_HITS_TO_OPEN = 2 // Quick lock within 2 frames
-        private const val MAX_GRACE_FRAMES = 8      // Persists through 250ms of shake / motion blur
-        private const val DEADBAND_THRESHOLD = 0.0035f // Zero micro-jitter when holding steady
+        private const val MAX_GRACE_FRAMES = 12      // Bridge short focus / motion blur without box flicker
+        private const val DEADBAND_THRESHOLD = 0.006f // Ignore sub-pixel/noisy corner shifts at rest
 
         // One-Euro Filter State per corner (4 corners x 2 axes = 8 filters)
         private val xPrev = FloatArray(4)
@@ -233,8 +233,10 @@ object BlueEdgeDetector {
             isX: Boolean
         ): Float {
             // Tuned for high stability and zero jitter at rest, with responsive tracking during panning
-            val minCutoff = 0.38f
-            val beta = 0.38f
+            // Steadier at rest; the derivative term still lets the frame follow
+            // a deliberate camera move instead of leaving the outline behind.
+            val minCutoff = 0.30f
+            val beta = 0.25f
             val dCutoff = 1.0f
 
             fun getAlpha(cutoff: Float, deltaT: Float): Float {

@@ -99,14 +99,17 @@ fun BlueEdgeOverlay(
                         animP3.snapTo(mapped[3])
                         animAlpha.animateTo(1f, tween(140, easing = LinearOutSlowInEasing))
                     } else {
-                        // Deadband threshold: if movement is under 3.5px (minor hand tremor / noise), freeze!
+                        // Small changes are sensor/detection jitter, not paper
+                        // motion. Once aligned, use a larger hold band so the
+                        // outline stays visually locked to the sheet.
                         val d0 = hypot(mapped[0].x - animP0.targetValue.x, mapped[0].y - animP0.targetValue.y)
                         val d1 = hypot(mapped[1].x - animP1.targetValue.x, mapped[1].y - animP1.targetValue.y)
                         val d2 = hypot(mapped[2].x - animP2.targetValue.x, mapped[2].y - animP2.targetValue.y)
                         val d3 = hypot(mapped[3].x - animP3.targetValue.x, mapped[3].y - animP3.targetValue.y)
                         val maxDelta = maxOf(d0, d1, d2, d3)
 
-                        if (maxDelta >= 3.5f) {
+                        val holdBandPx = if (state == com.docscan.util.DetectionState.DOCUMENT_STABLE) 8f else 5f
+                        if (maxDelta >= holdBandPx) {
                             val glideSpring = spring<Offset>(
                                 dampingRatio = Spring.DampingRatioNoBouncy,
                                 stiffness = Spring.StiffnessMediumLow

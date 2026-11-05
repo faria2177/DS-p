@@ -133,6 +133,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
@@ -222,6 +224,10 @@ fun CameraScanScreen(
 
     // QR & Barcode Mode State Observers
     val mainScanMode by viewModel.mainScanMode.collectAsStateWithLifecycle()
+    // Only the document camera is letterboxed by the top and bottom controls.
+    // A full-height FILL_CENTER preview crops the 4:3 sensor horizontally and
+    // makes a page look artificially zoomed-in on tall phones.
+    val useDocumentViewfinder = mainScanMode == MainScanMode.DOCUMENT && !isNidCaptureMode
     // CameraX binds its analyzer once; read the latest mode without rebinding the camera.
     val latestMainScanMode by rememberUpdatedState(mainScanMode)
     val qrScanSubMode by viewModel.qrScanSubMode.collectAsStateWithLifecycle()
@@ -262,6 +268,8 @@ fun CameraScanScreen(
     var focusTapOffset by remember { mutableStateOf<Offset?>(null) }
     var showLowLightHint by remember { mutableStateOf(false) }
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
+    var rootBoundsInRoot by remember { mutableStateOf<Rect?>(null) }
+    var previewBoundsInRoot by remember { mutableStateOf<Rect?>(null) }
     val barcodeScanner = remember { BarcodeAnalyzerHelper.createScanner() }
 
     // Real-time edge detection frame state
@@ -607,13 +615,24 @@ fun CameraScanScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onGloballyPositioned { rootBoundsInRoot = it.boundsInRoot() }
             .pointerInput(previewViewRef) {
                 detectTapGestures { offset ->
                     focusTapOffset = offset
                     previewViewRef?.let { pv ->
                         try {
+                            val previewBounds = previewBoundsInRoot
+                            val rootBounds = rootBoundsInRoot
+                            val previewOffset = if (previewBounds != null && rootBounds != null) {
+                                offset + rootBounds.topLeft - previewBounds.topLeft
+                            } else offset
+                            if (previewBounds != null &&
+                                (previewOffset.x !in 0f..previewBounds.width ||
+                                    previewOffset.y !in 0f..previewBounds.height)) {
+                                return@let
+                            }
                             val factory = pv.meteringPointFactory
-                            val point = factory.createPoint(offset.x, offset.y)
+                            val point = factory.createPoint(previewOffset.x, previewOffset.y)
                             val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE).build()
                             camera?.cameraControl?.startFocusAndMetering(action)
                         } catch (e: Exception) {
@@ -630,10 +649,12 @@ fun CameraScanScreen(
                 }
             }
     ) {
-        if (hasCameraPermission) {
-            // Live CameraX Preview
+        if (hasCameraPermission && !useDocumentViewfinder) {
+            // NID and barcode modes retain their original full-screen camera.
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { previewBoundsInRoot = it.boundsInRoot() },
                 factory = { ctx ->
                     PreviewView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
@@ -646,23 +667,7 @@ fun CameraScanScreen(
                 }
             )
 
-            // The document outline must share the *same full-screen bounds*
-            // as PreviewView. Drawing it inside the weighted viewfinder panel
-            // (between the top and bottom controls) uses a different crop and
-            // makes correct detection coordinates look misplaced on screen.
-            if (mainScanMode == MainScanMode.DOCUMENT && !isNidCaptureMode) {
-                BlueEdgeOverlay(
-                    corners = detectedCorners,
-                    state = detectedState,
-                    scanMode = scanMode,
-                    idCardStep = idCardStep,
-                    idCardType = selectedIdCardType,
-                    showGrid = showGridGuidelines,
-                    frameAspectRatio = detectedFrameAspect,
-                    modifier = Modifier.fillMaxSize()
-                )
-            }
-        } else {
+        } else if (!hasCameraPermission) {
             // Permission fallback message
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -934,6 +939,36 @@ fun CameraScanScreen(
                         .weight(1f)
                         .fillMaxWidth()
                 ) {
+                    if (hasCameraPermission && useDocumentViewfinder) {
+                        // Camera and quadrilateral use the identical center
+                        // viewport. This avoids the full-screen center crop
+                        // while retaining accurate preview-to-edge mapping.
+                        AndroidView(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .onGloballyPositioned { previewBoundsInRoot = it.boundsInRoot() },
+                            factory = { ctx ->
+                                PreviewView(ctx).apply {
+                                    layoutParams = ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                                    previewViewRef = this
+                                }
+                            }
+                        )
+                        BlueEdgeOverlay(
+                            corners = detectedCorners,
+                            state = detectedState,
+                            scanMode = scanMode,
+                            idCardStep = idCardStep,
+                            idCardType = selectedIdCardType,
+                            showGrid = showGridGuidelines,
+                            frameAspectRatio = detectedFrameAspect,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     if (hasCameraPermission) {
                         if (isNidCaptureMode) {
                             NidReferenceViewfinder(
