@@ -56,6 +56,20 @@ class EdgeDetectorTest {
         assertNotNull(corners)
         assertEquals(4, corners.size)
     }
+
+    @Test
+    fun `capture without a detectable document never trims off photo edges`() {
+        val bitmap = Bitmap.createBitmap(320, 480, Bitmap.Config.ARGB_8888)
+        Canvas(bitmap).drawColor(Color.rgb(20, 20, 20))
+
+        val corners = EdgeDetector.detectCapturedPhotoCorners(bitmap)
+        assertEquals(4, corners.size)
+        assertEquals(0f, corners[0].x, 0.001f)
+        assertEquals(0f, corners[0].y, 0.001f)
+        assertEquals(1f, corners[2].x, 0.001f)
+        assertEquals(1f, corners[2].y, 0.001f)
+    }
+
     @Test
     fun `full printed form is preferred over its inner table rectangles`() {
         val bitmap = Bitmap.createBitmap(700, 1000, Bitmap.Config.ARGB_8888)

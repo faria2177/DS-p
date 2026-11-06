@@ -935,7 +935,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             val detectedCorners = if (scanMode.value == ScanMode.ID_CARD) {
                 customCorners ?: EdgeDetector.idCardFrameCorners()
             } else {
-                customCorners ?: if (isAutoCropEnabled.value && ScanPreferences.autoAdjustBorders(context)) EdgeDetector.detectDocumentCorners(bitmap) else listOf(Offset(0f, 0f), Offset(1f, 0f), Offset(1f, 1f), Offset(0f, 1f))
+                customCorners ?: if (isAutoCropEnabled.value && ScanPreferences.autoAdjustBorders(context)) EdgeDetector.detectCapturedPhotoCorners(bitmap) else listOf(Offset(0f, 0f), Offset(1f, 0f), Offset(1f, 1f), Offset(0f, 1f))
             }
             val initialFilter = if (isMagicEnhanceEnabled.value) FilterType.MAGIC_COLOR else FilterType.ORIGINAL
             val tempPath = FileUtils.saveBitmapToTemp(context, bitmap)

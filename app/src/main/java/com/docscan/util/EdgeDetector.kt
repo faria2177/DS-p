@@ -11,6 +11,7 @@ import com.docscan.scanner.CoreEdgeDetector
 import com.docscan.scanner.DocumentRecognition
 import com.docscan.scanner.EdgeDetectionConfig
 import com.docscan.scanner.QuadTracker
+import com.docscan.scanner.ScannerTuning
 import com.docscan.scanner.TrackerState
 import org.opencv.android.Utils
 import org.opencv.core.Core
@@ -1236,8 +1237,10 @@ object EdgeDetector {
 
         val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
 
-        // Prioritize the outer page detector on captured photos. Legacy detection
-        // stages below may prefer strong form/table lines inside a white sheet.
+        // Prioritize the outer page detector on captured photos. A colored,
+        // two-part notebook can fool even a valid four-sided contour into
+        // following only the smooth inner cover, so compare an independent
+        // still-image detector before accepting its crop coordinates.
         val blueOuterCandidate = runCatching {
             com.docscan.scanner.BlueEdgeDetector.analyzeStillBitmap(bitmap)
         }.getOrNull()
@@ -1250,7 +1253,20 @@ object EdgeDetector {
                 blueOuterCandidate[2], blueOuterCandidate[3]
             )
             if (area >= 0.20f) {
-                Log.d(TAG, "Still detect: outer paper preferred area=$area")
+                // The already-contained inner cover often has higher surface
+                // smoothness than the real notebook's printed outer cover.
+                // Prefer the independent detector only if it finds a larger
+                // enclosing rectangle; unrelated or smaller contours cannot
+                // displace a previously valid whole-paper candidate.
+                val alternate = runCatching {
+                    detectProductionPhotoCorners(bitmap)
+                }.getOrNull()
+                if (alternate != null &&
+                    ScannerTuning.isLikelyOuterPageUpgrade(blueOuterCandidate, alternate)) {
+                    Log.d(TAG, "Still detect: recovered outside paper from inner cover")
+                    return alternate
+                }
+                Log.d(TAG, "Still detect: validated outer paper area=$area")
                 return blueOuterCandidate
             }
         }
@@ -1291,24 +1307,10 @@ object EdgeDetector {
 
         // ── Strategy 2: production multi-channel ──────────────────────────
         try {
-            val result = com.docscan.scanner.EdgeDetector.detect(bitmap)
-            if (result != null) {
-                val q = result.quad
-                val corners = listOf(
-                    result.toFullSpace(q.tl),
-                    result.toFullSpace(q.tr),
-                    result.toFullSpace(q.br),
-                    result.toFullSpace(q.bl)
-                ).map { p ->
-                    Offset(
-                        (p.x / bitmap.width).toFloat().coerceIn(0f, 1f),
-                        (p.y / bitmap.height).toFloat().coerceIn(0f, 1f)
-                    )
-                }
-                if (isRealDocumentDetected(corners, aspect) && !isNearFullFrame(corners) && !isNearDefault(corners)) {
-                    Log.d(TAG, "Still detect: strategy=production score=${q.score}")
-                    return corners
-                }
+            val corners = detectProductionPhotoCorners(bitmap)
+            if (corners != null) {
+                Log.d(TAG, "Still detect: strategy=production")
+                return corners
             }
         } catch (error: Throwable) {
             Log.w(TAG, "Still-image production detector failed", error)
@@ -1359,6 +1361,35 @@ object EdgeDetector {
 
         Log.d(TAG, "Still detect: all strategies missed → defaultCorners")
         return defaultCorners()
+    }
+
+    private fun detectProductionPhotoCorners(bitmap: Bitmap): List<Offset>? {
+        val result = com.docscan.scanner.EdgeDetector.detect(bitmap) ?: return null
+        val quad = result.quad
+        val corners = listOf(
+            result.toFullSpace(quad.tl), result.toFullSpace(quad.tr),
+            result.toFullSpace(quad.br), result.toFullSpace(quad.bl)
+        ).map { point ->
+            Offset(
+                (point.x / bitmap.width).toFloat().coerceIn(0f, 1f),
+                (point.y / bitmap.height).toFloat().coerceIn(0f, 1f)
+            )
+        }
+        val aspect = bitmap.width.toFloat() / bitmap.height.toFloat()
+        return corners.takeIf {
+            isRealDocumentDetected(it, aspect) && !isNearFullFrame(it) && !isNearDefault(it)
+        }
+    }
+
+    /** A missed edge should not silently trim the outside of a captured photo. */
+    fun detectCapturedPhotoCorners(bitmap: Bitmap): List<Offset> {
+        val corners = detectDocumentCorners(bitmap)
+        return if (isNearDefault(corners) || isNearBlueDetectorDefault(corners)) {
+            listOf(
+                Offset(0f, 0f), Offset(1f, 0f),
+                Offset(1f, 1f), Offset(0f, 1f)
+            )
+        } else corners
     }
 
     private fun isNearFullFrame(corners: List<Offset>): Boolean {

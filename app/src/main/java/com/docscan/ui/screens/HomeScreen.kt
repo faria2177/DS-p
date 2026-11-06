@@ -811,7 +811,10 @@ fun HomeScreen(
                     // Main Camera FAB
                     FloatingActionButton(
                         onClick = {
-                            isSpeedDialOpen = !isSpeedDialOpen
+                            // The primary Scan button opens the document camera
+                            // immediately. ID Card remains available from Tools.
+                            isSpeedDialOpen = false
+                            launchNativeScanner()
                         },
                         containerColor = ThemeAccentTeal,
                         contentColor = Color.White,
