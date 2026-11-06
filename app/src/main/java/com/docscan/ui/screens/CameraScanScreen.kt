@@ -1298,33 +1298,25 @@ fun CameraScanScreen(
                         modifier = Modifier.offset(y = (-14).dp)
                     )
                 }
-                // Match the camera's horizontal feature tabs. "All Features"
-                // belongs exclusively to the icon in the bottom deck below.
+                // ID Cards reference screenshots contain only Scan and ID Cards.
+                // Keep unrelated camera tools and the All Features deck hidden.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Color.Black)
-                        .horizontalScroll(rememberScrollState())
-                        .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(26.dp),
+                        .padding(top = 2.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    listOf("Scan", "Smart Erase", "ID Cards", "Question Set", "Translate").forEach { tab ->
+                    listOf("Scan", "ID Cards").forEachIndexed { index, tab ->
+                        if (index > 0) Spacer(Modifier.width(28.dp))
                         val selected = tab == "ID Cards"
                         Column(
                             modifier = Modifier.clickable {
-                                when (tab) {
-                                    "Scan" -> {
-                                        viewModel.showIdCardIntro.value = false
-                                        viewModel.scanMode.value = ScanMode.SINGLE
-                                        viewModel.activeFeatureMode.value = ScannerFeatureMode.SCAN
-                                    }
-                                    "Translate" -> {
-                                        viewModel.showIdCardIntro.value = false
-                                        viewModel.scanMode.value = ScanMode.SINGLE
-                                        viewModel.activeFeatureMode.value = ScannerFeatureMode.TRANSLATE
-                                    }
-                                    "Smart Erase", "Question Set" -> showAllFeaturesSheet = true
+                                if (tab == "Scan") {
+                                    viewModel.showIdCardIntro.value = false
+                                    viewModel.scanMode.value = ScanMode.SINGLE
+                                    viewModel.activeFeatureMode.value = ScannerFeatureMode.SCAN
                                 }
                             },
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -1345,22 +1337,7 @@ fun CameraScanScreen(
                         }
                     }
                 }
-                Box(
-                    modifier = Modifier.fillMaxWidth().height(116.dp).background(Color.Black),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .padding(start = 26.dp)
-                            .clickable { showAllFeaturesSheet = true }
-                            .padding(horizontal = 10.dp, vertical = 10.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(Icons.Default.GridView, contentDescription = "All Features", tint = Color.White, modifier = Modifier.size(27.dp))
-                        Spacer(Modifier.height(4.dp))
-                        Text("All Features", color = Color.White, fontSize = 12.sp)
-                    }
-                }
+                Spacer(Modifier.fillMaxWidth().height(116.dp).background(Color.Black))
             }
         }
 
