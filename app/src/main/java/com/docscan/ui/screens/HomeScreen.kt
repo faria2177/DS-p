@@ -423,7 +423,8 @@ fun HomeScreen(
     ) {
         if (mode == ScanMode.ID_CARD || featureMode == ScannerFeatureMode.ID_CARDS) {
             viewModel.enterNidCardMode()
-            onNavigateToNidSetup()
+            viewModel.showIdCardIntro.value = true
+            onNavigateToCamera()
         } else {
             viewModel.prepareNativeDocumentScan(mode, featureMode)
             onNavigateToCamera()

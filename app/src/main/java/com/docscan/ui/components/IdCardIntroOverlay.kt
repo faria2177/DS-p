@@ -78,7 +78,7 @@ private val ChipDarkBg: Color get() = ThemeManager.themeColor(Color(0xFF26282D),
  * Features:
  * - A4 Paper simulation card with "A4 paper example" badge
  * - Diagonal security watermark ("For xxx purpose only")
- * - Dynamic card mockups (General, ID Card, Driver License, Passport, Bank Card)
+ * - Dynamic card mockups (General, ID Card, Driver License, Passport, Bank Card, Certificate)
  * - Informative description with "Learn more >" modal
  * - Horizontal chips for ID card types
  * - "Make it now" primary CTA button
@@ -101,8 +101,8 @@ fun IdCardIntroOverlay(
         // 1. A4 Paper Example Simulation Card
         Surface(
             modifier = Modifier
-                .width(260.dp)
-                .aspectRatio(1f / 1.32f)
+                .width(210.dp)
+                .aspectRatio(1f / 1.4142f)
                 .shadow(16.dp, RoundedCornerShape(10.dp))
                 .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(10.dp)),
             shape = RoundedCornerShape(10.dp),
@@ -139,8 +139,29 @@ fun IdCardIntroOverlay(
                                 PassportMockup(modifier = Modifier.fillMaxWidth(0.95f))
                             }
                             IdCardType.GENERAL -> {
-                                GeneralIdFrontMockup(modifier = Modifier.fillMaxWidth(0.92f))
-                                GeneralIdBackMockup(modifier = Modifier.fillMaxWidth(0.92f))
+                                BankCardFrontMockup(modifier = Modifier.fillMaxWidth(0.92f))
+                            }
+                            IdCardType.CERTIFICATE -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(0.96f).aspectRatio(0.71f),
+                                    color = Color(0xFFFFFDF7),
+                                    border = androidx.compose.foundation.BorderStroke(2.dp, Color(0xFFD2BD87))
+                                ) {
+                                    Column(
+                                        modifier = Modifier.fillMaxSize().padding(9.dp)
+                                            .border(1.dp, Color(0xFFD2BD87), RoundedCornerShape(2.dp))
+                                            .padding(8.dp),
+                                        verticalArrangement = Arrangement.SpaceEvenly,
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text("CERTIFICATE", fontSize = 15.sp, color = Color(0xFF64502B), fontWeight = FontWeight.Bold)
+                                        Text("of Completion", fontSize = 11.sp, color = Color(0xFF7B6846))
+                                        Text("Awarded to", fontSize = 8.sp, color = Color.Gray)
+                                        Text("Your Name", fontSize = 16.sp, color = Color(0xFF3F4B55), fontWeight = FontWeight.SemiBold)
+                                        Text("For outstanding achievement", fontSize = 8.sp, color = Color.Gray)
+                                        Text("___________________", fontSize = 10.sp, color = Color(0xFF9E8B68))
+                                    }
+                                }
                             }
                         }
                     }
@@ -207,7 +228,8 @@ fun IdCardIntroOverlay(
             IdCardType.ID_CARD,
             IdCardType.DRIVER_LICENSE,
             IdCardType.PASSPORT,
-            IdCardType.BANK_CARD
+            IdCardType.BANK_CARD,
+            IdCardType.CERTIFICATE
         )
 
         Row(

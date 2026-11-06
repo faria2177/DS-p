@@ -541,6 +541,31 @@ object ImageProcessor {
     }
 
     /**
+     * One-sided ID, passport, or certificate on an A4 portrait sheet.
+     * Fit inside the print area without forcing a card-like aspect ratio: certificates
+     * and passport data pages must not be stretched or distorted.
+     */
+    fun mergeSingleCopyOnA4(image: Bitmap, fullPage: Boolean): Bitmap {
+        val sheetWidth = 1414
+        val sheetHeight = 2000
+        val merged = Bitmap.createBitmap(sheetWidth, sheetHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(merged)
+        canvas.drawColor(Color.WHITE)
+
+        val widthLimit = sheetWidth * if (fullPage) 0.94f else 0.78f
+        val heightLimit = sheetHeight * if (fullPage) 0.94f else 0.43f
+        val fitScale = minOf(widthLimit / image.width, heightLimit / image.height)
+        val fittedWidth = (image.width * fitScale).toInt().coerceAtLeast(1)
+        val fittedHeight = (image.height * fitScale).toInt().coerceAtLeast(1)
+        val left = (sheetWidth - fittedWidth) / 2f
+        val top = (sheetHeight - fittedHeight) / 2f
+        val scaled = Bitmap.createScaledBitmap(image, fittedWidth, fittedHeight, true)
+        canvas.drawBitmap(scaled, left, top, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        if (scaled !== image) scaled.recycle()
+        return merged
+    }
+
+    /**
      * Applies mosaic / pixelation to specified normalized regions (0..1)
      */
     fun applyMosaic(source: Bitmap, regions: List<RectF>, pixelBlockSize: Int = 18): Bitmap {

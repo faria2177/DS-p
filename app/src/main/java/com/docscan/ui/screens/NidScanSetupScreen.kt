@@ -76,6 +76,8 @@ fun NidScanSetupScreen(
     val pages by viewModel.capturedPages.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val processingStage by viewModel.nidProcessingStage.collectAsStateWithLifecycle()
+    val selectedType by viewModel.selectedIdCardType.collectAsStateWithLifecycle()
+    val twoSided = selectedType.isTwoSided
     fun scanSide(side: Int) {
         if (isProcessing) return
         val selectedSide = if (side == 2) 2 else 1
@@ -85,7 +87,7 @@ fun NidScanSetupScreen(
 
     val front = pages.firstOrNull { it.label.startsWith("Front", ignoreCase = true) }
     val back = pages.firstOrNull { it.label.startsWith("Back", ignoreCase = true) }
-    val bothReady = front != null && back != null
+    val bothReady = front != null && (!twoSided || back != null)
 
     Box(
         modifier = Modifier
@@ -113,7 +115,7 @@ fun NidScanSetupScreen(
                     )
                 }
                 Text(
-                    text = "Scan ID",
+                    text = "Scan ${selectedType.title}",
                     color = NidBlue,
                     fontSize = 23.sp,
                     fontWeight = FontWeight.Bold,
@@ -124,7 +126,7 @@ fun NidScanSetupScreen(
             Spacer(Modifier.height(10.dp))
 
             Text(
-                text = "Scan the front and back of your ID",
+                text = if (twoSided) "Scan the front and back of your ${selectedType.title}" else "Scan your ${selectedType.title}",
                 color = NidText,
                 fontSize = 17.sp,
                 lineHeight = 23.sp,
@@ -133,28 +135,29 @@ fun NidScanSetupScreen(
             Spacer(Modifier.height(20.dp))
 
             NidSideSection(
-                title = "FRONT",
+                title = if (twoSided) "FRONT" else selectedType.title.uppercase(),
                 page = front,
                 isFront = true,
                 onClick = { scanSide(1) }
             )
 
-            Spacer(Modifier.height(14.dp))
-
-            NidSideSection(
-                title = "BACK",
-                page = back,
-                isFront = false,
-                onClick = { scanSide(2) }
-            )
+            if (twoSided) {
+                Spacer(Modifier.height(14.dp))
+                NidSideSection(
+                    title = "BACK",
+                    page = back,
+                    isFront = false,
+                    onClick = { scanSide(2) }
+                )
+            }
 
             Spacer(Modifier.height(14.dp))
 
             Text(
                 text = if (bothReady) {
-                    "Both sides are ready. Tap SAVE ID to auto-crop and create your NID preview."
+                    if (twoSided) "Both sides are ready. Save to create one A4 page." else "Your ${selectedType.title} is ready for an A4 preview."
                 } else {
-                    "Scan both sides to save them together on one page."
+                    if (twoSided) "Scan both sides to save them together on one page." else "Capture the document to create an A4 copy."
                 },
                 color = if (bothReady) Color(0xFF5F6B76) else NidSubText,
                 fontSize = 13.sp,
@@ -196,7 +199,7 @@ fun NidScanSetupScreen(
                     )
                 } else {
                     Text(
-                        text = "SAVE ID",
+                        text = "SAVE ${selectedType.title.uppercase()}",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )

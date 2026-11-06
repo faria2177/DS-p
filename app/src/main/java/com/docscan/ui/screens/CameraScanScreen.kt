@@ -61,6 +61,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -198,6 +200,7 @@ fun CameraScanScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCrop: () -> Unit,
     onNavigateToDocumentPreview: () -> Unit,
+    onNavigateToNidSetup: () -> Unit = {},
     onNidSideCaptured: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -780,38 +783,6 @@ fun CameraScanScreen(
                         )
                     }
                 }
-            } else if (!isNidCaptureMode) {
-                // Document scanning has its own camera. QR & Barcode remains
-                // available from Tools -> Scan Code, not this scan toolbar.
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = ScannerTeal
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.DocumentScanner,
-                                contentDescription = null,
-                                tint = Color.Black,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                "Document",
-                                color = Color.Black,
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-                }
             }
 
             if (mainScanMode == MainScanMode.DOCUMENT) {
@@ -967,6 +938,7 @@ fun CameraScanScreen(
                             NidReferenceViewfinder(
                                 state = detectedState,
                                 idCardStep = idCardStep,
+                                idCardType = selectedIdCardType,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -1126,6 +1098,7 @@ fun CameraScanScreen(
                                 when (feature) {
                                     ScannerFeatureMode.ID_CARDS -> {
                                         viewModel.enterNidCardMode()
+                                        viewModel.showIdCardIntro.value = true
                                     }
                                     ScannerFeatureMode.SCAN -> {
                                         viewModel.showIdCardIntro.value = false
@@ -1240,6 +1213,110 @@ fun CameraScanScreen(
             }
         }
 
+        // The ID Cards landing screen floats above the live preview, as in the supplied
+        // reference.  Selection is kept in the ViewModel and used by the actual scanner.
+        if (isNidCaptureMode && showIdCardIntro && !isNidSetupCapture) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xC8000000))
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+            ) {
+                Spacer(Modifier.height(32.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .background(Color.Black)
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = {
+                        viewModel.showIdCardIntro.value = false
+                        onNavigateBack()
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close ID Cards", tint = Color.White)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = {
+                        val enabled = !isTorchOn
+                        isTorchOn = enabled
+                        camera?.cameraControl?.enableTorch(enabled)
+                    }) {
+                        Icon(
+                            if (isTorchOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                            contentDescription = "Toggle flashlight",
+                            tint = if (isTorchOn) Color.Yellow else Color.White
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = if (isHdModeEnabled) ScannerTeal else Color(0xFF32353B),
+                        modifier = Modifier.clickable {
+                            viewModel.isHdModeEnabled.value = !isHdModeEnabled
+                        }
+                    ) {
+                        Text("HD", color = if (isHdModeEnabled) Color.Black else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp))
+                    }
+                    Box {
+                        IconButton(onClick = { showMoreMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More camera options", tint = Color.White)
+                        }
+                        DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(if (isHdModeEnabled) "Turn HD off" else "Turn HD on") },
+                                onClick = {
+                                    viewModel.isHdModeEnabled.value = !isHdModeEnabled
+                                    showMoreMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    IdCardIntroOverlay(
+                        selectedType = selectedIdCardType,
+                        onTypeSelected = { viewModel.selectedIdCardType.value = it },
+                        onMakeItNow = {
+                            viewModel.showIdCardIntro.value = false
+                            onNavigateToNidSetup()
+                        }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                        .background(Color.Black).padding(vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(28.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Spacer(Modifier.width(10.dp))
+                    Text("Scan", color = Color.White, modifier = Modifier.clickable {
+                        viewModel.prepareNativeDocumentScan()
+                    })
+                    Text("Smart Erase", color = Color.LightGray, modifier = Modifier.clickable {
+                        showAllFeaturesSheet = true
+                    })
+                    Text("ID Cards", color = ScannerTeal, fontWeight = FontWeight.Bold)
+                    Text("All Features", color = Color.White, modifier = Modifier.clickable {
+                        showAllFeaturesSheet = true
+                    })
+                }
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(70.dp).background(Color.Black)
+                        .clickable { showAllFeaturesSheet = true },
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    Column(Modifier.padding(start = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.GridView, contentDescription = null, tint = Color.White)
+                        Text("All Features", color = Color.White, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
         // QR / BARCODE MODAL BOTTOM SHEETS & DIALOGS
         activeScannedBarcode?.let { result ->
             QrResultBottomSheet(
@@ -1310,6 +1387,7 @@ fun CameraScanScreen(
                         "ID Card" -> {
                             viewModel.mainScanMode.value = MainScanMode.DOCUMENT
                             viewModel.enterNidCardMode()
+                            viewModel.showIdCardIntro.value = true
                         }
                         "Translate" -> {
                             viewModel.mainScanMode.value = MainScanMode.DOCUMENT
@@ -1401,6 +1479,7 @@ fun NidReferenceTopBar(
 fun NidReferenceViewfinder(
     state: DetectionState,
     idCardStep: Int,
+    idCardType: IdCardType = IdCardType.ID_CARD,
     modifier: Modifier = Modifier
 ) {
     val detected = state == DetectionState.DOCUMENT_DETECTED || state == DetectionState.DOCUMENT_STABLE
@@ -1413,8 +1492,13 @@ fun NidReferenceViewfinder(
 
             // The reference frame is intentionally a little wider than a physical ID-1 card.
             // Perspective correction later normalizes the actual card to its correct ratio.
-            val frameW = w * 0.90f
-            val frameH = (frameW / 1.82f).coerceAtMost(h * 0.48f)
+            val isPortraitDocument = idCardType == IdCardType.CERTIFICATE || idCardType == IdCardType.PASSPORT
+            val frameW = if (isPortraitDocument) w * 0.78f else w * 0.90f
+            val frameH = if (isPortraitDocument) {
+                (frameW * 1.36f).coerceAtMost(h * 0.65f)
+            } else {
+                (frameW / 1.82f).coerceAtMost(h * 0.48f)
+            }
             val left = (w - frameW) / 2f
             val top = (h * 0.43f - frameH / 2f).coerceAtLeast(h * 0.12f)
             val rect = Rect(left, top, left + frameW, top + frameH)

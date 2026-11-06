@@ -734,6 +734,11 @@ fun AppNavGraph(
                 onNavigateToDocumentPreview = {
                     navController.navigate(Screen.DocumentPreview.route)
                 },
+                onNavigateToNidSetup = {
+                    navController.navigate(Screen.NidSetup.route) {
+                        popUpTo(Screen.Camera.route) { inclusive = true }
+                    }
+                },
                 onNidSideCaptured = {
                     navController.popBackStack(Screen.NidSetup.route, inclusive = false)
                 }
@@ -756,6 +761,9 @@ fun AppNavGraph(
                 },
                 onNavigateToDocumentPreview = {
                     navController.navigate(Screen.DocumentPreview.route)
+                },
+                onNavigateToNidSetup = {
+                    navController.navigate(Screen.NidSetup.route)
                 }
             )
         }

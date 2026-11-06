@@ -283,7 +283,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     fun enterNidCardMode() {
         scanMode.value = ScanMode.ID_CARD
         activeFeatureMode.value = ScannerFeatureMode.ID_CARDS
-        selectedIdCardType.value = IdCardType.ID_CARD
+        selectedIdCardType.value = IdCardType.GENERAL
         showIdCardIntro.value = false
 
         // Every NID session starts clean and remains manual.
@@ -316,7 +316,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     fun prepareNidSetupSide(side: Int) {
         scanMode.value = ScanMode.ID_CARD
         activeFeatureMode.value = ScannerFeatureMode.ID_CARDS
-        selectedIdCardType.value = IdCardType.ID_CARD
+        showIdCardIntro.value = false
         idCardStep.value = if (side == 2) 2 else 1
         isNidSetupCapture.value = true
         isAutoCaptureEnabled.value = false
@@ -346,13 +346,35 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         fallbackCorners: List<Offset>? = null
     ) {
         val isFront = side == 1
+        val cardType = selectedIdCardType.value
         isProcessing.value = true
         nidProcessingStage.value = if (isFront) {
-            "Auto-cropping NID front…"
+            "Auto-cropping ${cardType.title} front…"
         } else {
-            "Auto-cropping NID back…"
+            "Auto-cropping ${cardType.title} back…"
         }
         try {
+            if (!cardType.isTwoSided) {
+                val corners = EdgeDetector.detectCapturedPhotoCorners(bitmap)
+                val crop = ImageProcessor.perspectiveCrop(bitmap, corners)
+                val rawPath = FileUtils.saveBitmapToTemp(context, bitmap, "CARD_SINGLE_RAW")
+                val croppedPath = FileUtils.saveBitmapToTemp(context, crop, "CARD_SINGLE_CROP")
+                upsertNidSetupPage(
+                    1,
+                    TempScannedPage(
+                        originalPath = rawPath,
+                        processedPath = croppedPath,
+                        corners = corners,
+                        filterType = FilterType.ORIGINAL,
+                        watermarkText = null,
+                        label = "Front Side (${cardType.title})"
+                    )
+                )
+                idCardFront.value = bitmap
+                idCardBack.value = null
+                currentCropPageIndex.value = 0
+                return
+            }
             val result = NidAutoProcessor.processSide(
                 bitmap = bitmap,
                 fallbackCorners = fallbackCorners,
@@ -374,7 +396,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 corners = result.corners,
                 filterType = FilterType.ORIGINAL,
                 watermarkText = null,
-                label = if (isFront) "Front Side (NID Card)" else "Back Side (NID Card)"
+                label = if (isFront) "Front Side (${cardType.title})" else "Back Side (${cardType.title})"
             )
             upsertNidSetupPage(side, page)
 
@@ -415,8 +437,25 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
      * crop/perspective, OCR, face and barcode verification use the best available full-resolution data.
      */
     fun finalizeNidSetup(onComplete: () -> Unit) {
+        val cardType = selectedIdCardType.value
         val frontPage = capturedPages.value.firstOrNull { it.label.startsWith("Front", true) }
         val backPage = capturedPages.value.firstOrNull { it.label.startsWith("Back", true) }
+        if (!cardType.isTwoSided) {
+            if (frontPage == null) {
+                Toast.makeText(context, "Scan ${cardType.title} first.", Toast.LENGTH_SHORT).show()
+                return
+            }
+            capturedPages.value = listOf(frontPage)
+            currentCropPageIndex.value = 0
+            idCardStep.value = 1
+            isNidSetupCapture.value = false
+            showIdCardIntro.value = false
+            sessionDocumentTitle.value = "${cardType.title} " + SimpleDateFormat(
+                "dd-MM-yyyy HH.mm", Locale.getDefault()
+            ).format(Date())
+            onComplete()
+            return
+        }
         if (frontPage == null || backPage == null) {
             Toast.makeText(context, "Scan both Front and Back first.", Toast.LENGTH_SHORT).show()
             return
@@ -452,7 +491,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 currentCropPageIndex.value = 0
                 idCardStep.value = 1
                 isNidSetupCapture.value = false
-                sessionDocumentTitle.value = "NID Card " + SimpleDateFormat(
+                sessionDocumentTitle.value = "${cardType.title} " + SimpleDateFormat(
                     "dd-MM-yyyy HH.mm",
                     Locale.getDefault()
                 ).format(Date())
@@ -481,13 +520,13 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                         processedPath = frontProcessedPath,
                         corners = pair.front.corners,
                         filterType = FilterType.ORIGINAL,
-                        label = "Front Side (NID Card)"
+                        label = "Front Side (${cardType.title})"
                     ),
                     backPage.copy(
                         processedPath = backProcessedPath,
                         corners = pair.back.corners,
                         filterType = FilterType.ORIGINAL,
-                        label = "Back Side (NID Card)"
+                        label = "Back Side (${cardType.title})"
                     )
                 )
 
@@ -498,7 +537,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 currentCropPageIndex.value = 0
                 idCardStep.value = 1
                 isNidSetupCapture.value = false
-                sessionDocumentTitle.value = "NID Card " + SimpleDateFormat(
+                sessionDocumentTitle.value = "${cardType.title} " + SimpleDateFormat(
                     "dd-MM-yyyy HH.mm",
                     Locale.getDefault()
                 ).format(Date())
@@ -1824,7 +1863,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 // Check if this is a 2-sided ID Card scan session
                 val isIdCardMode = (scanMode.value == ScanMode.ID_CARD)
                 val isIdCardComposite = isIdCardMode && (capturedPages.value.size >= 2)
-                val isPassportSingle = isIdCardMode && (capturedPages.value.size == 1)
+                val isSingleCardCopy = isIdCardMode && (capturedPages.value.size == 1)
 
                 if (isIdCardComposite) {
                     // 1-2. Prepare both NID sides from the highest-quality ML Kit/source pixels.
@@ -1880,7 +1919,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                             )
                         )
                     }
-                } else if (isPassportSingle) {
+                } else if (isSingleCardCopy) {
                     val p0 = capturedPages.value[0]
                     val raw0 = FileUtils.loadBitmap(p0.originalPath)
                     val rotated0 = raw0?.let { ImageProcessor.rotate(it, p0.rotationDegrees) } ?: raw0
@@ -1890,7 +1929,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                     } ?: rotated0
 
                     if (filtered0 != null) {
-                        var mergedA4Bitmap = ImageProcessor.mergePassport(filtered0)
+                        val fullPage = selectedIdCardType.value == IdCardType.CERTIFICATE ||
+                            selectedIdCardType.value == IdCardType.PASSPORT
+                        var mergedA4Bitmap = ImageProcessor.mergeSingleCopyOnA4(filtered0, fullPage)
                         p0.watermarkText?.takeIf { it.isNotBlank() }?.let { wmText ->
                             mergedA4Bitmap = ImageProcessor.applyWatermark(
                                 mergedA4Bitmap,

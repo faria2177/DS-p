@@ -31,11 +31,12 @@ enum class IdCardType(
     val subtitle: String,
     val isTwoSided: Boolean
 ) {
-    GENERAL("General", "Standard 2-sided identity card", true),
-    ID_CARD("NID Card", "National ID card front & back", true),
+    GENERAL("General", "Single card copy on A4 paper", false),
+    ID_CARD("ID Card", "National ID card front & back", true),
     DRIVER_LICENSE("Driver License", "Driving license card front & back", true),
     PASSPORT("Passport", "Passport data page on A4", false),
-    BANK_CARD("Bank Card", "Credit / Debit card front & back", true)
+    BANK_CARD("Bank Card", "Credit / Debit card front & back", true),
+    CERTIFICATE("Certificate", "Certificate copy on an A4 sheet", false)
 }
 
 @Entity(tableName = "documents")
