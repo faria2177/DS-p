@@ -1,7 +1,5 @@
 package com.docscan.ui.components
 
-import com.docscan.util.ThemeManager
-
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -71,7 +69,10 @@ import androidx.compose.ui.unit.sp
 import com.docscan.data.model.IdCardType
 
 private val EmeraldTeal = Color(0xFF00C896)
-private val ChipDarkBg: Color get() = ThemeManager.themeColor(Color(0xFF26282D), Color(0xFFF1F5F9))
+// The camera intro always has a dark photographic backdrop, even when the rest
+// of DocScanner uses the light theme. Light-theme chips used to become white
+// with white labels, making five of the six options look blank.
+private val ChipDarkBg = Color(0x9926282D)
 
 /**
  * ID Cards intro overlay matching CamScanner / reference design.
@@ -167,6 +168,28 @@ fun IdCardIntroOverlay(
                     }
                 }
 
+                // The A4 reference sheet displays a very faint repeating security
+                // watermark; this is a preview decoration, not an exported watermark.
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val paperCanvas = drawContext.canvas.nativeCanvas
+                    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = android.graphics.Color.argb(19, 60, 60, 60)
+                        textSize = 12.sp.toPx()
+                    }
+                    paperCanvas.save()
+                    paperCanvas.rotate(-45f, size.width / 2f, size.height / 2f)
+                    var y = -size.height
+                    while (y < size.height * 2f) {
+                        var x = -size.width
+                        while (x < size.width * 2f) {
+                            paperCanvas.drawText("For xxx purpose only", x, y, paint)
+                            x += 205.dp.toPx()
+                        }
+                        y += 84.dp.toPx()
+                    }
+                    paperCanvas.restore()
+                }
+
                 // Top-Left "A4 paper example" badge
                 Surface(
                     shape = RoundedCornerShape(4.dp),
@@ -186,7 +209,7 @@ fun IdCardIntroOverlay(
             }
         }
 
-        Spacer(modifier = Modifier.height(40.dp))
+        Spacer(modifier = Modifier.height(68.dp))
 
         // 2. Subtitle Description with "Learn more >"
         val annotatedString = buildAnnotatedString {
@@ -242,9 +265,9 @@ fun IdCardIntroOverlay(
             chips.forEach { chipType ->
                 val isSelected = (chipType == selectedType)
                 Surface(
-                    shape = RoundedCornerShape(18.dp),
+                    shape = RoundedCornerShape(7.dp),
                     color = if (isSelected) Color.White else ChipDarkBg,
-                    border = if (!isSelected) androidx.compose.foundation.BorderStroke(1.dp, Color(0x33FFFFFF)) else null,
+                    border = null,
                     modifier = Modifier
                         .height(38.dp)
                         .clickable { onTypeSelected(chipType) }

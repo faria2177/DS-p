@@ -940,7 +940,7 @@ fun CameraScanScreen(
                         )
                     }
                     if (hasCameraPermission) {
-                        if (isNidCaptureMode) {
+                        if (isNidCaptureMode && !showIdCardIntro) {
                             NidReferenceViewfinder(
                                 state = detectedState,
                                 idCardStep = idCardStep,
@@ -1294,34 +1294,70 @@ fun CameraScanScreen(
                         onTypeSelected = { viewModel.selectedIdCardType.value = it },
                         onMakeItNow = {
                             viewModel.beginSelectedIdCardCapture()
-                        }
+                        },
+                        modifier = Modifier.offset(y = (-14).dp)
                     )
                 }
+                // Match the camera's horizontal feature tabs. "All Features"
+                // belongs exclusively to the icon in the bottom deck below.
                 Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                        .background(Color.Black).padding(vertical = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                        .horizontalScroll(rememberScrollState())
+                        .padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(26.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Spacer(Modifier.width(10.dp))
-                    Text("Scan", color = Color.White, modifier = Modifier.clickable {
-                        viewModel.prepareNativeDocumentScan()
-                    })
-                    Text("Smart Erase", color = Color.LightGray, modifier = Modifier.clickable {
-                        showAllFeaturesSheet = true
-                    })
-                    Text("ID Cards", color = ScannerTeal, fontWeight = FontWeight.Bold)
-                    Text("All Features", color = Color.White, modifier = Modifier.clickable {
-                        showAllFeaturesSheet = true
-                    })
+                    listOf("Scan", "Smart Erase", "ID Cards", "Question Set", "Translate").forEach { tab ->
+                        val selected = tab == "ID Cards"
+                        Column(
+                            modifier = Modifier.clickable {
+                                when (tab) {
+                                    "Scan" -> {
+                                        viewModel.showIdCardIntro.value = false
+                                        viewModel.scanMode.value = ScanMode.SINGLE
+                                        viewModel.activeFeatureMode.value = ScannerFeatureMode.SCAN
+                                    }
+                                    "Translate" -> {
+                                        viewModel.showIdCardIntro.value = false
+                                        viewModel.scanMode.value = ScanMode.SINGLE
+                                        viewModel.activeFeatureMode.value = ScannerFeatureMode.TRANSLATE
+                                    }
+                                    "Smart Erase", "Question Set" -> showAllFeaturesSheet = true
+                                }
+                            },
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(34.dp)
+                                    .height(3.dp)
+                                    .background(if (selected) ScannerTeal else Color.Transparent, RoundedCornerShape(2.dp))
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = tab,
+                                color = if (selected) ScannerTeal else Color(0xFFBEBEC1),
+                                fontSize = 14.sp,
+                                maxLines = 1
+                            )
+                        }
+                    }
                 }
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(70.dp).background(Color.Black)
-                        .clickable { showAllFeaturesSheet = true },
+                    modifier = Modifier.fillMaxWidth().height(116.dp).background(Color.Black),
                     contentAlignment = Alignment.CenterStart
                 ) {
-                    Column(Modifier.padding(start = 24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.GridView, contentDescription = null, tint = Color.White)
+                    Column(
+                        modifier = Modifier
+                            .padding(start = 26.dp)
+                            .clickable { showAllFeaturesSheet = true }
+                            .padding(horizontal = 10.dp, vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(Icons.Default.GridView, contentDescription = "All Features", tint = Color.White, modifier = Modifier.size(27.dp))
+                        Spacer(Modifier.height(4.dp))
                         Text("All Features", color = Color.White, fontSize = 12.sp)
                     }
                 }
