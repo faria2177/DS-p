@@ -101,7 +101,7 @@ fun IdCardIntroOverlay(
         // 1. A4 Paper Example Simulation Card
         Surface(
             modifier = Modifier
-                .width(210.dp)
+                .width(180.dp)
                 .aspectRatio(1f / 1.4142f)
                 .shadow(16.dp, RoundedCornerShape(10.dp))
                 .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(10.dp)),
@@ -186,7 +186,7 @@ fun IdCardIntroOverlay(
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(40.dp))
 
         // 2. Subtitle Description with "Learn more >"
         val annotatedString = buildAnnotatedString {
@@ -275,7 +275,7 @@ fun IdCardIntroOverlay(
                 contentColor = Color(0xFF041E15)
             ),
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.80f)
                 .height(50.dp)
                 .shadow(8.dp, RoundedCornerShape(26.dp), spotColor = EmeraldTeal)
         ) {

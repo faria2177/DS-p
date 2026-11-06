@@ -1219,7 +1219,7 @@ fun CameraScanScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color(0xC8000000))
+                    .background(Color(0x88000000))
                     .windowInsetsPadding(WindowInsets.statusBars)
                     .windowInsetsPadding(WindowInsets.navigationBars)
             ) {
