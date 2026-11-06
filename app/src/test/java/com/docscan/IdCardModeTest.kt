@@ -24,4 +24,18 @@ class IdCardModeTest {
         assertFalse(IdCardType.PASSPORT.isTwoSided)
         assertFalse(IdCardType.CERTIFICATE.isTwoSided)
     }
+
+    @Test
+    fun `gallery selection enforces two sides but certificates have no image limit`() {
+        for (type in listOf(IdCardType.ID_CARD, IdCardType.DRIVER_LICENSE, IdCardType.BANK_CARD)) {
+            assertEquals(2, type.maximumPages)
+            assertEquals(2, type.remainingPages(0))
+            assertEquals(1, type.remainingPages(1))
+            assertEquals(0, type.remainingPages(2))
+        }
+        assertEquals(1, IdCardType.PASSPORT.maximumPages)
+        assertEquals(1, IdCardType.GENERAL.maximumPages)
+        assertEquals(null, IdCardType.CERTIFICATE.maximumPages)
+        assertEquals(null, IdCardType.CERTIFICATE.remainingPages(500))
+    }
 }

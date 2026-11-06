@@ -122,6 +122,8 @@ fun DocumentPreviewScreen(
 ) {
     val capturedPages by viewModel.capturedPages.collectAsState()
     val scanMode by viewModel.scanMode.collectAsState()
+    val selectedCardType by viewModel.selectedIdCardType.collectAsState()
+    val isTwoSidedCardPreview = scanMode == ScanMode.ID_CARD && selectedCardType.isTwoSided
     val docTitle by viewModel.sessionDocumentTitle.collectAsState()
     val isSaving by viewModel.isProcessing.collectAsState()
     val context = LocalContext.current
@@ -154,7 +156,7 @@ fun DocumentPreviewScreen(
     // Re-render only the current capture session on crop/filter/rotation changes.
     // Keep heavy bitmap work off the main thread and clear the loading state even
     // if an individual page is missing or fails to decode.
-    LaunchedEffect(capturedPages, scanMode, activeIndex) {
+    LaunchedEffect(capturedPages, scanMode, selectedCardType, activeIndex) {
         isRendering = capturedPages.isNotEmpty()
         try {
             val renderedPages = withContext(Dispatchers.IO) {
@@ -163,7 +165,7 @@ fun DocumentPreviewScreen(
                 val rendered = MutableList<Pair<Bitmap?, Bitmap?>>(capturedPages.size) {
                     null to null
                 }
-                val indices = if (scanMode == ScanMode.ID_CARD) {
+                val indices = if (isTwoSidedCardPreview) {
                     capturedPages.indices.take(2)
                 } else {
                     listOf(activeIndex).filter { it in capturedPages.indices }
@@ -187,7 +189,7 @@ fun DocumentPreviewScreen(
                                 kotlin.math.abs(page.corners[2].y - 1f) < 0.015f
                             val cropped = if (fullFrame) rotated else
                                 ImageProcessor.perspectiveCrop(rotated, page.corners)
-                            val cleaned = if (scanMode == ScanMode.ID_CARD) {
+                            val cleaned = if (isTwoSidedCardPreview) {
                                 NidCleanProcessor.enhance(cropped, isFront = index == 0)
                             } else {
                                 cropped
@@ -321,10 +323,10 @@ fun DocumentPreviewScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(if (scanMode == ScanMode.ID_CARD) 16.dp else 8.dp),
+                    .padding(if (isTwoSidedCardPreview) 16.dp else 8.dp),
                 contentAlignment = Alignment.Center
             ) {
-                if (scanMode != ScanMode.ID_CARD) {
+                if (!isTwoSidedCardPreview) {
                     Column(
                         modifier = Modifier.fillMaxSize(),
                         horizontalAlignment = Alignment.CenterHorizontally
@@ -643,7 +645,7 @@ fun DocumentPreviewScreen(
             CompareBeforeAfterModal(
                 originalBitmap = activeOriginal,
                 processedBitmap = activeProcessed,
-                cardLabel = if (scanMode == ScanMode.ID_CARD) {
+                cardLabel = if (isTwoSidedCardPreview) {
                     if (selectedCardIndex == 0) "Front Side" else "Back Side"
                 } else "Page ${selectedCardIndex + 1}",
                 onDismiss = { showCompareModal = false }

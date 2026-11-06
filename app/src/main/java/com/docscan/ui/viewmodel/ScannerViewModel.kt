@@ -305,6 +305,17 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         sessionDocumentTitle.value = "ID Card " + SimpleDateFormat("dd-MM-yyyy HH.mm", Locale.getDefault()).format(Date())
     }
 
+    /** Start the selected reference-style ID camera directly, with the right document name. */
+    fun beginSelectedIdCardCapture() {
+        scanMode.value = ScanMode.ID_CARD
+        activeFeatureMode.value = ScannerFeatureMode.ID_CARDS
+        showIdCardIntro.value = false
+        idCardStep.value = 1
+        isNidSetupCapture.value = false
+        sessionDocumentTitle.value = "${selectedIdCardType.value.title} " +
+            SimpleDateFormat("dd-MM-yyyy HH.mm", Locale.getDefault()).format(Date())
+    }
+
 
     fun cancelNidSetupSideCapture() {
         isNidSetupCapture.value = false
@@ -430,6 +441,155 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             }
             withContext(Dispatchers.Main) { onDone() }
         }
+    }
+
+    /** Add as many certificate scans as needed, without replacing previous pages. */
+    private suspend fun appendCertificatePage(bitmap: Bitmap) {
+        val corners = EdgeDetector.detectCapturedPhotoCorners(bitmap)
+        val original = FileUtils.saveBitmapToTemp(context, bitmap, "CERTIFICATE_RAW")
+        val cropped = ImageProcessor.perspectiveCrop(bitmap, corners)
+        val processed = FileUtils.saveBitmapToTemp(context, cropped, "CERTIFICATE_CROP")
+        val number = capturedPages.value.size + 1
+        capturedPages.value = capturedPages.value + TempScannedPage(
+            originalPath = original,
+            processedPath = processed,
+            corners = corners,
+            filterType = FilterType.ORIGINAL,
+            label = "Certificate Page $number"
+        )
+        currentCropPageIndex.value = number - 1
+    }
+
+    /** Import one or two card sides together, or an unlimited certificate batch. */
+    fun importIdCardImages(bitmaps: List<Bitmap>, onNavigateToPreview: () -> Unit) {
+        if (bitmaps.isEmpty()) return
+        val type = selectedIdCardType.value
+        val remaining = type.remainingPages(capturedPages.value.size)
+        if (remaining != null && bitmaps.size > remaining) {
+            Toast.makeText(
+                context,
+                "${type.title} allows ${type.maximumPages} image(s). Select $remaining or fewer.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            isProcessing.value = true
+            try {
+                if (type == IdCardType.CERTIFICATE) {
+                    bitmaps.forEach { appendCertificatePage(it) }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "${capturedPages.value.size} certificate page(s) ready. Scan more or tap Done.", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+
+                bitmaps.forEach { bitmap ->
+                    val nextSide = if (type.isTwoSided) capturedPages.value.size + 1 else 1
+                    processNidSetupSideInternal(bitmap, nextSide)
+                }
+                val ready = capturedPages.value.size == type.maximumPages
+                if (type.isTwoSided && !ready) {
+                    idCardStep.value = 2
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Front imported. Capture or import Back.", Toast.LENGTH_SHORT).show()
+                    }
+                } else if (type.isTwoSided) {
+                    withContext(Dispatchers.Main) { finalizeNidSetup(onNavigateToPreview) }
+                } else {
+                    withContext(Dispatchers.Main) { onNavigateToPreview() }
+                }
+            } catch (error: Throwable) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Import failed: ${error.localizedMessage}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                isProcessing.value = false
+            }
+        }
+    }
+
+    /**
+     * Gallery entry point: validate the card limit before decoding. Certificates are
+     * decoded and stored one URI at a time to avoid retaining an entire batch in RAM.
+     */
+    fun importIdCardUris(uris: List<Uri>, onNavigateToPreview: () -> Unit) {
+        if (uris.isEmpty()) return
+        val type = selectedIdCardType.value
+        val remaining = type.remainingPages(capturedPages.value.size)
+        if (remaining != null && uris.size > remaining) {
+            Toast.makeText(
+                context,
+                "Select at most $remaining more ${type.title} image(s).",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        if (type != IdCardType.CERTIFICATE) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val bitmaps = uris.flatMap { FileUtils.loadBitmapsFromUri(context, it) }
+                    withContext(Dispatchers.Main) {
+                        if (bitmaps.isEmpty()) {
+                            Toast.makeText(context, "Could not load selected images.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            importIdCardImages(bitmaps, onNavigateToPreview)
+                        }
+                    }
+                } catch (error: Exception) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Import failed: ${error.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            isProcessing.value = true
+            try {
+                uris.forEach { uri ->
+                    FileUtils.loadBitmapsFromUri(context, uri).forEach { bitmap ->
+                        try {
+                            appendCertificatePage(bitmap)
+                        } finally {
+                            if (!bitmap.isRecycled) bitmap.recycle()
+                        }
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "${capturedPages.value.size} certificate page(s) ready. Import more or tap Done.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (error: Throwable) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Import failed: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            } finally {
+                isProcessing.value = false
+            }
+        }
+    }
+
+    /** Undo the most recent card side or certificate page while staying in the camera. */
+    fun undoLastIdCardCapture() {
+        val pages = capturedPages.value
+        if (pages.isEmpty()) {
+            showIdCardIntro.value = true
+            return
+        }
+        val removed = pages.last()
+        capturedPages.value = pages.dropLast(1)
+        if (selectedIdCardType.value.isTwoSided) {
+            idCardStep.value = if (capturedPages.value.isEmpty()) 1 else 2
+            if (removed.label.startsWith("Front", true)) idCardFront.value = null
+            if (removed.label.startsWith("Back", true)) idCardBack.value = null
+        }
+        currentCropPageIndex.value = (capturedPages.value.size - 1).coerceAtLeast(0)
     }
 
     /**
@@ -971,6 +1131,23 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         onNidSideCaptured: (() -> Unit)? = null
     ) {
         viewModelScope.launch(Dispatchers.IO) {
+            if (scanMode.value == ScanMode.ID_CARD &&
+                selectedIdCardType.value == IdCardType.CERTIFICATE && !isNidSetupCapture.value
+            ) {
+                isProcessing.value = true
+                nidProcessingStage.value = "Auto-cropping certificate page…"
+                try {
+                    appendCertificatePage(bitmap)
+                } catch (error: Throwable) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Could not crop certificate: ${error.message}", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    isProcessing.value = false
+                    nidProcessingStage.value = null
+                }
+                return@launch
+            }
             val detectedCorners = if (scanMode.value == ScanMode.ID_CARD) {
                 customCorners ?: EdgeDetector.idCardFrameCorners()
             } else {
@@ -1023,34 +1200,14 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     if (!cardType.isTwoSided) {
-                        isProcessing.value = true
-                        nidProcessingStage.value = "Auto-cropping ID card…"
                         try {
-                            val processed = NidAutoProcessor.processSide(
-                                bitmap = bitmap,
-                                fallbackCorners = fallbackCorners,
-                                isFront = true
-                            )
-                            val processedPath = FileUtils.saveBitmapToTemp(context, processed.croppedPreview)
-                            capturedPages.value = listOf(
-                                TempScannedPage(
-                                    originalPath = tempPath,
-                                    processedPath = processedPath,
-                                    corners = processed.corners,
-                                    filterType = FilterType.ORIGINAL,
-                                    watermarkText = null,
-                                    label = "${cardType.title} Page"
-                                )
-                            )
-                            nidFrontOcrText.value = processed.ocrText
-                            nidFrontFaceDetected.value = processed.faceDetected
-                            currentCropPageIndex.value = 0
-                            idCardStep.value = 1
-                        } finally {
-                            isProcessing.value = false
-                            nidProcessingStage.value = null
+                            processNidSetupSideInternal(bitmap, side = 1)
+                            withContext(Dispatchers.Main) { onNavigateToPreview() }
+                        } catch (error: Throwable) {
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(context, "Could not scan ${cardType.title}: ${error.message}", Toast.LENGTH_SHORT).show()
+                            }
                         }
-                        withContext(Dispatchers.Main) { onNavigateToPreview() }
                     } else if (idCardStep.value == 1) {
                         // Keep the raw front capture so the second-side completion step can run
                         // one accuracy-first processing pass over both sides together.
@@ -1118,7 +1275,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
                             currentCropPageIndex.value = 0
                             idCardStep.value = 1
-                            sessionDocumentTitle.value = "NID Card " + SimpleDateFormat(
+                            sessionDocumentTitle.value = "${cardType.title} " + SimpleDateFormat(
                                 "dd-MM-yyyy HH.mm",
                                 Locale.getDefault()
                             ).format(Date())
@@ -1862,7 +2019,10 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
                 // Check if this is a 2-sided ID Card scan session
                 val isIdCardMode = (scanMode.value == ScanMode.ID_CARD)
-                val isIdCardComposite = isIdCardMode && (capturedPages.value.size >= 2)
+                val isIdCardComposite = isIdCardMode && selectedIdCardType.value.isTwoSided &&
+                    (capturedPages.value.size >= 2)
+                val isCertificateMulti = isIdCardMode &&
+                    selectedIdCardType.value == IdCardType.CERTIFICATE && capturedPages.value.size >= 2
                 val isSingleCardCopy = isIdCardMode && (capturedPages.value.size == 1)
 
                 if (isIdCardComposite) {
@@ -1916,6 +2076,44 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                                 watermarkColor = p0.watermarkColor,
                                 extractedText = ocrText.ifBlank { null },
                                 notes = "NID_COMPOSITE_A4"
+                            )
+                        )
+                    }
+                } else if (isCertificateMulti) {
+                    // Certificates are an unlimited document collection, not a two-card composite.
+                    // Preserve each page on its own A4 sheet and in the user's capture order.
+                    capturedPages.value.forEachIndexed { index, page ->
+                        val original = FileUtils.loadBitmap(page.originalPath, maxDimension = 4096)
+                            ?: return@forEachIndexed
+                        val rotated = ImageProcessor.rotate(original, page.rotationDegrees)
+                        val cropped = ImageProcessor.perspectiveCrop(rotated, page.corners)
+                        val adjusted = ImageProcessor.applyFilter(
+                            cropped, page.filterType, page.brightness, page.contrast
+                        )
+                        var sheet = ImageProcessor.mergeSingleCopyOnA4(adjusted, fullPage = true)
+                        page.watermarkText?.takeIf { it.isNotBlank() }?.let { wm ->
+                            sheet = ImageProcessor.applyWatermark(
+                                sheet, wm, page.watermarkOpacity, page.watermarkColor
+                            )
+                        }
+                        val ocrText = runCatching { TextRecognizerHelper.extractText(sheet) }.getOrDefault("")
+                        val finalPath = FileUtils.saveBitmapToDocStorage(
+                            context, sheet, prefix = "CERTIFICATE_A4", quality = 100
+                        )
+                        processedPageEntities.add(
+                            PageEntity(
+                                documentId = targetDocumentId ?: 0,
+                                pageNumber = index + 1,
+                                originalImagePath = page.originalPath,
+                                processedImagePath = finalPath,
+                                filterType = page.filterType.name,
+                                brightness = page.brightness,
+                                contrast = page.contrast,
+                                rotationDegrees = 0,
+                                watermarkText = page.watermarkText,
+                                watermarkOpacity = page.watermarkOpacity,
+                                watermarkColor = page.watermarkColor,
+                                extractedText = ocrText.ifBlank { null }
                             )
                         )
                     }

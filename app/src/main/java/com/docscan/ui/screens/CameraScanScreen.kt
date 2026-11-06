@@ -94,6 +94,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -333,32 +334,35 @@ fun CameraScanScreen(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            coroutineScope.launch(Dispatchers.IO) {
-                val bitmaps = mutableListOf<Bitmap>()
-                uris.forEach { uri ->
-                    val loaded = FileUtils.loadBitmapsFromUri(context, uri)
-                    bitmaps.addAll(loaded)
-                }
-                if (bitmaps.isNotEmpty()) {
-                    withContext(Dispatchers.Main) {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        if (isNidCaptureMode && isNidSetupCapture) {
-                            // The Scan ID landing page owns Front/Back selection. Gallery import
-                            // therefore fills only the selected side and returns to that page.
-                            viewModel.importNidSetupSide(bitmaps.first()) {
-                                onNidSideCaptured()
-                            }
-                        } else {
-                            viewModel.onMultipleImagesImported(
-                                bitmaps = bitmaps,
-                                onNavigateToCrop = { onNavigateToCrop() },
-                                onNavigateToPreview = { onNavigateToDocumentPreview() }
-                            )
-                        }
+            if (isNidCaptureMode && !isNidSetupCapture) {
+                viewModel.importIdCardUris(uris) { onNavigateToDocumentPreview() }
+            } else {
+                coroutineScope.launch(Dispatchers.IO) {
+                    val bitmaps = mutableListOf<Bitmap>()
+                    uris.forEach { uri ->
+                        val loaded = FileUtils.loadBitmapsFromUri(context, uri)
+                        bitmaps.addAll(loaded)
                     }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Could not load selected file.", Toast.LENGTH_SHORT).show()
+                    if (bitmaps.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (isNidCaptureMode && isNidSetupCapture) {
+                                // Legacy Scan ID landing: import into its selected side.
+                                viewModel.importNidSetupSide(bitmaps.first()) {
+                                    onNidSideCaptured()
+                                }
+                            } else {
+                                viewModel.onMultipleImagesImported(
+                                    bitmaps = bitmaps,
+                                    onNavigateToCrop = { onNavigateToCrop() },
+                                    onNavigateToPreview = { onNavigateToDocumentPreview() }
+                                )
+                            }
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(context, "Could not load selected file.", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             }
@@ -441,7 +445,7 @@ fun CameraScanScreen(
                             // frequently lock onto bedspread / inner ruled lines —
                             // the full still pipeline is far more accurate.
                             // ID Card mode keeps the fixed CR-80 frame.
-                            val activeCorners = if (scanMode == ScanMode.ID_CARD) {
+                            val activeCorners = if (scanMode == ScanMode.ID_CARD && selectedIdCardType.isTwoSided) {
                                 // Prefer the real live quad when the NID/card is detected.
                                 // If detection is temporarily unavailable, fall back to the fixed capture frame.
                                 if (detectedCorners.size == 4 &&
@@ -790,7 +794,9 @@ fun CameraScanScreen(
                 if (isNidCaptureMode) {
                     NidReferenceTopBar(
                         isTorchOn = isTorchOn,
+                        isHdEnabled = isHdModeEnabled,
                         onCloseClick = onNavigateBack,
+                        onHdClick = { viewModel.isHdModeEnabled.value = !isHdModeEnabled },
                         onFlashClick = {
                             val nextTorch = !isTorchOn
                             isTorchOn = nextTorch
@@ -1055,6 +1061,12 @@ fun CameraScanScreen(
                     NidReferenceBottomControls(
                         isShutterBusy = isShutterBusy || isProcessing,
                         idCardStep = idCardStep,
+                        selectedType = selectedIdCardType,
+                        pageCount = capturedPages.size,
+                        onUndoClick = { viewModel.undoLastIdCardCapture() },
+                        onDoneClick = {
+                            if (capturedPages.isNotEmpty()) onNavigateToDocumentPreview()
+                        },
                         onGalleryClick = { galleryLauncher.launch("image/*") },
                         onShutterClick = { capturePhoto() },
                         modifier = Modifier
@@ -1281,8 +1293,7 @@ fun CameraScanScreen(
                         selectedType = selectedIdCardType,
                         onTypeSelected = { viewModel.selectedIdCardType.value = it },
                         onMakeItNow = {
-                            viewModel.showIdCardIntro.value = false
-                            onNavigateToNidSetup()
+                            viewModel.beginSelectedIdCardCapture()
                         }
                     )
                 }
@@ -1424,17 +1435,20 @@ fun CameraScanScreen(
 @Composable
 fun NidReferenceTopBar(
     isTorchOn: Boolean,
+    isHdEnabled: Boolean,
     onCloseClick: () -> Unit,
     onFlashClick: () -> Unit,
+    onHdClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showCameraMenu by remember { mutableStateOf(false) }
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xEE050505))
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .background(Color.Black)
+            .padding(top = 42.dp, start = 14.dp, end = 14.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         IconButton(
             onClick = onCloseClick,
@@ -1442,18 +1456,13 @@ fun NidReferenceTopBar(
         ) {
             Icon(
                 Icons.Default.Close,
-                contentDescription = "Close NID scanner",
+                contentDescription = "Close card scanner",
                 tint = Color.White,
                 modifier = Modifier.size(29.dp)
             )
         }
 
-        Text(
-            text = "Scan document",
-            color = Color.White,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Spacer(Modifier.weight(1f))
 
         IconButton(
             onClick = onFlashClick,
@@ -1465,6 +1474,33 @@ fun NidReferenceTopBar(
                 tint = if (isTorchOn) Color(0xFFFFD54F) else Color.White,
                 modifier = Modifier.size(27.dp)
             )
+        }
+        Surface(
+            color = if (isHdEnabled) Color.White else Color(0xFF36383D),
+            shape = RoundedCornerShape(4.dp),
+            modifier = Modifier.clickable(onClick = onHdClick)
+        ) {
+            Text(
+                "HD",
+                color = if (isHdEnabled) Color.Black else Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp)
+            )
+        }
+        Box {
+            IconButton(onClick = { showCameraMenu = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = "Camera options", tint = Color.White)
+            }
+            DropdownMenu(
+                expanded = showCameraMenu,
+                onDismissRequest = { showCameraMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (isHdEnabled) "Disable HD" else "Enable HD") },
+                    onClick = { onHdClick(); showCameraMenu = false }
+                )
+            }
         }
     }
 }
@@ -1482,8 +1518,7 @@ fun NidReferenceViewfinder(
     idCardType: IdCardType = IdCardType.ID_CARD,
     modifier: Modifier = Modifier
 ) {
-    val detected = state == DetectionState.DOCUMENT_DETECTED || state == DetectionState.DOCUMENT_STABLE
-    val accent = Color(0xFF29BFF4)
+    val accent = Color.White
 
     Box(modifier = modifier) {
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1493,14 +1528,14 @@ fun NidReferenceViewfinder(
             // The reference frame is intentionally a little wider than a physical ID-1 card.
             // Perspective correction later normalizes the actual card to its correct ratio.
             val isPortraitDocument = idCardType == IdCardType.CERTIFICATE || idCardType == IdCardType.PASSPORT
-            val frameW = if (isPortraitDocument) w * 0.78f else w * 0.90f
+            val frameW = if (isPortraitDocument) w * 0.92f else w * 0.90f
             val frameH = if (isPortraitDocument) {
-                (frameW * 1.36f).coerceAtMost(h * 0.65f)
+                (frameW * 1.414f).coerceAtMost(h * 0.86f)
             } else {
-                (frameW / 1.82f).coerceAtMost(h * 0.48f)
+                (frameW / 1.62f).coerceAtMost(h * 0.48f)
             }
             val left = (w - frameW) / 2f
-            val top = (h * 0.43f - frameH / 2f).coerceAtLeast(h * 0.12f)
+            val top = (h - frameH) / 2f
             val rect = Rect(left, top, left + frameW, top + frameH)
 
             // Gentle dim outside the guide to create the reference scanner look.
@@ -1508,7 +1543,14 @@ fun NidReferenceViewfinder(
             val inner = Path().apply { addRoundRect(RoundRect(rect, CornerRadius(10.dp.toPx()))) }
             drawPath(
                 Path.combine(androidx.compose.ui.graphics.PathOperation.Difference, outer, inner),
-                Color(0x2E000000)
+                Color(0x68000000)
+            )
+
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.11f),
+                topLeft = Offset(rect.left, rect.top),
+                size = Size(rect.width, rect.height),
+                cornerRadius = CornerRadius(10.dp.toPx())
             )
 
             // Very thin neutral frame line.
@@ -1538,33 +1580,31 @@ fun NidReferenceViewfinder(
             drawLine(accent, Offset(rect.right, rect.bottom - len), Offset(rect.right, rect.bottom - r), sw)
         }
 
-        Surface(
-            shape = RoundedCornerShape(22.dp),
-            color = if (detected) Color(0xFF087FC8) else Color(0xB3151A20),
-            border = if (detected) null else androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-            modifier = Modifier
-                .align(Alignment.Center)
-                .offset(y = 112.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    Icons.Default.Description,
-                    contentDescription = null,
-                    tint = if (detected) Color(0xFFDDF5FF) else Color(0xFFB7C1CC),
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = if (detected) "Document detected" else if (idCardStep == 1) "Align front side" else "Align back side",
-                    color = if (detected) Color.White else Color(0xFFD1D5DB),
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
+        val guideLabel = when {
+            idCardType.isTwoSided -> if (idCardStep == 1) "Front" else "Back"
+            idCardType == IdCardType.CERTIFICATE -> "Rotate your device and fit the document into the borders"
+            else -> "Fit it into the borders"
         }
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0x880D0F15),
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 22.dp, start = 12.dp, end = 12.dp)
+        ) {
+            Text(
+                text = guideLabel,
+                color = Color.White,
+                fontSize = 15.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+        Text(
+            text = idCardType.title,
+            color = ScannerTeal,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+        )
     }
 }
 
@@ -1575,94 +1615,97 @@ fun NidReferenceViewfinder(
 fun NidReferenceBottomControls(
     isShutterBusy: Boolean,
     idCardStep: Int,
+    selectedType: IdCardType,
+    pageCount: Int,
+    onUndoClick: () -> Unit,
+    onDoneClick: () -> Unit,
     onGalleryClick: () -> Unit,
     onShutterClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
-        color = Color(0xF20B0D10),
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        color = Color.Black,
         modifier = modifier
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 20.dp, bottom = 14.dp),
+                .padding(top = 12.dp, bottom = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceEvenly
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Surface(
-                    shape = CircleShape,
-                    color = Color.Transparent,
-                    border = androidx.compose.foundation.BorderStroke(2.5.dp, Color.White),
-                    modifier = Modifier
-                        .size(72.dp)
-                        .clickable { onGalleryClick() }
+                IconButton(
+                    onClick = onUndoClick,
+                    modifier = Modifier.size(58.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Default.Image,
-                            contentDescription = "Import NID from gallery",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
+                    Icon(
+                        Icons.Default.Undo,
+                        contentDescription = "Undo last card image or return to card types",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
                 }
 
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(100.dp)
+                        .size(84.dp)
                         .clip(CircleShape)
                         .clickable(enabled = !isShutterBusy) { onShutterClick() }
-                        .border(4.dp, Color.White, CircleShape)
-                        .padding(9.dp)
-                        .border(2.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+                        .border(4.dp, ScannerTeal, CircleShape)
+                        .padding(7.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(72.dp)
+                            .size(66.dp)
                             .background(if (isShutterBusy) Color(0xFFB8B8B8) else Color.White, CircleShape)
                     )
                 }
 
-                // Symmetric spacer keeps the shutter visually centered like the reference UI.
-                Box(modifier = Modifier.size(72.dp), contentAlignment = Alignment.Center) {
+                Column(
+                    modifier = Modifier.width(82.dp).clickable(onClick = onGalleryClick),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Default.Image,
+                        contentDescription = "Import Images",
+                        tint = Color.White,
+                        modifier = Modifier.size(29.dp)
+                    )
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        text = if (idCardStep == 1) "Front" else "Back",
-                        color = Color.White.copy(alpha = 0.72f),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        text = "Import Images",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 28.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
+            if (selectedType == IdCardType.CERTIFICATE && pageCount > 0) {
+                Spacer(Modifier.height(14.dp))
+                Surface(
+                    color = ScannerTeal,
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier.clickable(enabled = !isShutterBusy, onClick = onDoneClick)
+                ) {
+                    Text(
+                        text = "Done • $pageCount page${if (pageCount == 1) "" else "s"}",
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 34.dp, vertical = 10.dp)
+                    )
+                }
+            } else if (selectedType.isTwoSided && pageCount == 1) {
+                Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "Doc Scanner will have access only to the images that you scan",
-                    color = Color(0xFFE5E7EB),
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Icon(
-                    Icons.Default.Info,
-                    contentDescription = "Privacy information",
-                    tint = Color.White.copy(alpha = 0.92f),
-                    modifier = Modifier.size(24.dp)
+                    text = "Front ready • Scan or import Back",
+                    color = Color(0xFFB7C2C9),
+                    fontSize = 12.sp
                 )
             }
         }
