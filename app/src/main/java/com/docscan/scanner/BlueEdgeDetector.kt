@@ -57,20 +57,16 @@ object BlueEdgeDetector {
     private const val TARGET_LONG_SIDE = 720
     private const val MIN_LONG_SIDE = 360
 
-    // Fast scan on every preview frame; reserve expensive recovery for
-    // ambiguous frames to avoid stalling CameraX's keep-only-latest queue.
+    // The fast median/Canny pass runs on every preview frame. A plausible
+    // partial notebook (plain cover half) must NOT suppress all the slower
+    // outer-border searches: those still run once per three preview frames.
     private var liveFallbackSequence = 0L
 
     @Synchronized
     private fun fullLiveFallbackDue(): Boolean {
-        val due = liveFallbackSequence % 3L == 0L
+        val runFull = liveFallbackSequence % 3L == 0L
         liveFallbackSequence++
-        return due
-    }
-
-    @Synchronized
-    private fun resetFallbackSequence() {
-        liveFallbackSequence = 0L
+        return runFull
     }
 
     private val EPSILON_VALUES = floatArrayOf(0.012f, 0.018f, 0.025f, 0.035f, 0.048f)
@@ -175,13 +171,15 @@ object BlueEdgeDetector {
             } else {
                 newCorners
             }
+            val outerPageUpgrade = currentLast != null && confidence >= 0.48f &&
+                ScannerTuning.isLikelyOuterPageUpgrade(currentLast, alignedCorners)
 
             // A contour can temporarily latch onto one printed line, making
             // exactly one corner collapse toward the middle of a steady page.
-            // This is not a physical camera/paper translation: hold the last
-            // real quad instead of letting the filter grow a diagonal side.
+            // BUT a newly found larger enclosing page must be allowed to fix
+            // that exact corner when the old quad was the one missing paper.
             if (currentLast != null && trackCount >= 2 &&
-                isIsolatedCornerWarp(currentLast, alignedCorners)) {
+                !outerPageUpgrade && isIsolatedCornerWarp(currentLast, alignedCorners)) {
                 pendingRelocation = null
                 pendingRelocationHits = 0
                 return Pair(smoothedCorners, true)
@@ -193,7 +191,6 @@ object BlueEdgeDetector {
             // spurious contour caused the live outline to flicker wildly.
             if (currentLast != null && trackCount >= 4 &&
                 isDrasticJump(currentLast, alignedCorners)) {
-                val outerPageUpgrade = isOutwardExpansion(currentLast, alignedCorners)
                 if (outerPageUpgrade) {
                     for (i in initialized.indices) initialized[i] = false
                 } else {
@@ -357,26 +354,6 @@ object BlueEdgeDetector {
             }.sortedDescending()
             return movements.size == 4 && movements[0] >= 0.085f &&
                 movements[1] <= 0.035f
-        }
-
-        private fun isOutwardExpansion(previous: List<Offset>, candidate: List<Offset>): Boolean {
-            if (previous.size != 4 || candidate.size != 4) return false
-            val oldLeft = previous.minOf { it.x }
-            val oldRight = previous.maxOf { it.x }
-            val oldTop = previous.minOf { it.y }
-            val oldBottom = previous.maxOf { it.y }
-            val newLeft = candidate.minOf { it.x }
-            val newRight = candidate.maxOf { it.x }
-            val newTop = candidate.minOf { it.y }
-            val newBottom = candidate.maxOf { it.y }
-            val previousArea = (oldRight - oldLeft) * (oldBottom - oldTop)
-            val candidateArea = (newRight - newLeft) * (newBottom - newTop)
-            val containsPrevious = oldLeft >= newLeft - 0.025f &&
-                oldRight <= newRight + 0.025f &&
-                oldTop >= newTop - 0.025f &&
-                oldBottom <= newBottom + 0.025f
-            return containsPrevious && previousArea > 0.001f &&
-                candidateArea > previousArea * 1.45f
         }
 
         fun defaultCorners(): List<Offset> = listOf(
@@ -746,9 +723,9 @@ object BlueEdgeDetector {
         }
 
         try {
-
-            // Fast physical-paper contour before heavier Scharr/Hough passes.
-            // Suppresses decorative texture without rejecting a faint sheet.
+            // FAST PATH: the smooth physical page gets first priority. This
+            // runs before the eight expensive contour / Hough / Scharr passes,
+            // so a clearly visible document can lock in 2 analysis frames.
             val fastGray = Mat()
             val fastEdges = Mat()
             val fastClosed = Mat()
@@ -771,17 +748,19 @@ object BlueEdgeDetector {
                 fastKernel.release()
             }
 
-            val fastPaperFound = candidateList.any {
-                it.areaNorm >= 0.14f && it.surfaceScore >= 0.62f &&
-                    it.confidence >= 0.43f
-            }
-            if (fastPaperFound && liveMode) resetFallbackSequence()
-            // Preserve live responsiveness when the recovery passes are costly.
-            if (!fastPaperFound && liveMode && !fullLiveFallbackDue()) {
+            // A dark, two-tone notebook can produce a convincing FAST contour
+            // around just its smooth cover. Still run the outer-page Otsu/Hough
+            // passes periodically even with a quick candidate on this frame.
+            // Keep the rest of the frames lightweight for responsive preview.
+            val runFullRecovery = !liveMode || fullLiveFallbackDue()
+            // A valid fast quad must still be shown on lightweight frames,
+            // including textured pages whose surface score is below 0.62.
+            if (candidateList.isEmpty() && !runFullRecovery) {
                 return null
             }
-            // Still image extraction must run full detection for crop accuracy.
-            if (!fastPaperFound || !liveMode) {
+            // For a captured still, preserve the exhaustive detector: no
+            // preview frame-rate deadline applies and crop accuracy wins.
+            if (runFullRecovery) {
             // --- PASS 0: CLAHE Local Adaptive Thresholding (Block size 25) ---
             val adaptMat0 = Mat()
             val kAdapt0 = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
@@ -920,8 +899,7 @@ object BlueEdgeDetector {
                 kGrad.release()
             }
 
-
-            } // end heavyweight recovery
+            }
         } finally {
             claheMat.release()
             cannyEdgeMat.release()
@@ -934,8 +912,11 @@ object BlueEdgeDetector {
         // This eliminates any internal tables or text frames inside the paper.
         val outerCandidates = candidateList.filter { candA ->
             val isChildOfLarger = candidateList.any { candB ->
-                if (candB.areaNorm > candA.areaNorm * 1.25f &&
-                    candB.surfaceScore + 0.20f >= candA.surfaceScore) {
+                // A patterned notebook cover may be far less smooth than a
+                // plain-colored HALF of that same cover. If the larger quad
+                // really encloses the smaller candidate's center and already
+                // passed all four physical-border checks, it is the page.
+                if (candB.areaNorm > candA.areaNorm * 1.22f) {
                     val centerA = Point(
                         (candA.rawPts[0].x + candA.rawPts[1].x + candA.rawPts[2].x + candA.rawPts[3].x) / 4.0,
                         (candA.rawPts[0].y + candA.rawPts[1].y + candA.rawPts[2].y + candA.rawPts[3].y) / 4.0

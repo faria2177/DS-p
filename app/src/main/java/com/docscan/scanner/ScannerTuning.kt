@@ -2,6 +2,7 @@ package com.docscan.scanner
 
 // Scanner pipeline revision: 2026-09 — stable page-boundary tuning.
 
+import androidx.compose.ui.geometry.Offset
 import org.opencv.core.Mat
 import org.opencv.core.Point
 import kotlin.math.abs
@@ -23,6 +24,46 @@ object ScannerTuning {
     const val MIN_SIDE_EDGE_SUPPORT = 0.08
     const val MIN_AVG_EDGE_SUPPORT = 0.15
     const val MIN_BOUNDARY_CONTRAST = 2.5
+
+    /**
+     * An outer quad can genuinely enclose a smaller, false inner-cover quad
+     * even if one extrapolated inner corner lies just outside the new bounding
+     * rectangle. Axis-aligned bounding-box area is misleading for rotated
+     * pages: compare real polygon area and require the old center to be inside.
+     */
+    fun isLikelyOuterPageUpgrade(previous: List<Offset>, candidate: List<Offset>): Boolean {
+        if (previous.size != 4 || candidate.size != 4 ||
+            (previous + candidate).any { !it.x.isFinite() || !it.y.isFinite() }) return false
+
+        fun area(points: List<Offset>): Double {
+            var sum = 0.0
+            for (i in 0..3) {
+                val a = points[i]
+                val b = points[(i + 1) % 4]
+                sum += a.x.toDouble() * b.y - b.x.toDouble() * a.y
+            }
+            return abs(sum) * 0.5
+        }
+
+        val previousArea = area(previous)
+        val candidateArea = area(candidate)
+        if (previousArea < 0.005 || candidateArea < previousArea * 1.20) return false
+
+        val centerX = previous.sumOf { it.x.toDouble() } / 4.0
+        val centerY = previous.sumOf { it.y.toDouble() } / 4.0
+        var winding = 0
+        for (i in 0..3) {
+            val a = candidate[i]
+            val b = candidate[(i + 1) % 4]
+            val cross = (b.x - a.x) * (centerY - a.y) -
+                (b.y - a.y) * (centerX - a.x)
+            if (abs(cross) < 1e-7) continue
+            val sign = if (cross > 0) 1 else -1
+            if (winding != 0 && winding != sign) return false
+            winding = sign
+        }
+        return winding != 0
+    }
 
     fun normalizedLongRatio(q: Array<Point>): Double {
         if (q.size != 4) return 0.0
