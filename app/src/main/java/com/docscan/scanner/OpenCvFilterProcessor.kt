@@ -13,6 +13,39 @@ import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 
+/** Pure tuning shared by the Magic Color pipeline and JVM regression tests. */
+internal object MagicPaperTuning {
+    // These limits are applied to YCrCb AFTER flattening illumination. The
+    // luminance condition protects dark letters; chroma limits protect colored
+    // stamps, seals and highlighter marks from being turned gray.
+    const val PAPER_MIN_Y = 170.0
+    const val PAPER_MIN_CR = 97.0
+    const val PAPER_MAX_CR = 157.0
+    const val PAPER_MIN_CB = 67.0
+    const val PAPER_MAX_CB = 157.0
+    const val PAPER_CHROMA_RETAINED = 0.12
+
+    private val inputLevels = intArrayOf(0, 40, 75, 105, 135, 165, 185, 205, 225, 240, 255)
+    private val outputLevels = intArrayOf(0, 6, 14, 25, 45, 78, 105, 156, 224, 252, 255)
+
+    fun isPaperLike(y: Int, cr: Int, cb: Int): Boolean =
+        y >= PAPER_MIN_Y && cr in PAPER_MIN_CR.toInt()..PAPER_MAX_CR.toInt() &&
+            cb in PAPER_MIN_CB.toInt()..PAPER_MAX_CB.toInt()
+
+    fun magicTone(value: Int): Int {
+        val level = value.coerceIn(0, 255)
+        var segment = 0
+        while (segment < inputLevels.lastIndex - 1 && level > inputLevels[segment + 1]) {
+            segment++
+        }
+        val low = inputLevels[segment]
+        val high = inputLevels[segment + 1]
+        val fraction = (level - low).toDouble() / (high - low)
+        return (outputLevels[segment] + fraction * (outputLevels[segment + 1] - outputLevels[segment]))
+            .toInt().coerceIn(0, 255)
+    }
+}
+
 /**
  * Premium OpenCV Image Filter Engine for Professional Document Scanning.
  * Upgraded with ML-Kit style illumination normalization and shadow removal.
@@ -123,21 +156,7 @@ object OpenCvFilterProcessor {
             // Adjustable, continuous contrast curve: background -> white, text ->
             // black, while retaining grey antialiased strokes instead of deleting
             // them with a hard threshold.
-            val inputLevels = intArrayOf(0, 40, 75, 105, 135, 165, 185, 205, 225, 240, 255)
-            val outputLevels = intArrayOf(0, 7, 16, 27, 48, 78, 107, 151, 205, 245, 255)
-            val lutBytes = ByteArray(256)
-            for (level in 0..255) {
-                var segment = 0
-                while (segment < inputLevels.lastIndex - 1 && level > inputLevels[segment + 1]) {
-                    segment++
-                }
-                val lower = inputLevels[segment]
-                val upper = inputLevels[segment + 1]
-                val fraction = (level - lower).toDouble() / (upper - lower)
-                val mapped = outputLevels[segment] +
-                    fraction * (outputLevels[segment + 1] - outputLevels[segment])
-                lutBytes[level] = mapped.toInt().coerceIn(0, 255).toByte()
-            }
+            val lutBytes = ByteArray(256) { MagicPaperTuning.magicTone(it).toByte() }
             val toneLut = Mat(1, 256, CvType.CV_8UC1)
             owned.add(toneLut)
             toneLut.put(0, 0, lutBytes)
@@ -149,7 +168,7 @@ object OpenCvFilterProcessor {
             val smallBlur = temporary()
             val sharpened = temporary()
             Imgproc.GaussianBlur(toned, smallBlur, Size(0.0, 0.0), 0.8)
-            Core.addWeighted(toned, 1.16, smallBlur, -0.16, 0.0, sharpened)
+            Core.addWeighted(toned, 1.20, smallBlur, -0.20, 0.0, sharpened)
             val adjustedLum = temporary()
             sharpened.convertTo(
                 adjustedLum, CvType.CV_8U,
@@ -157,12 +176,35 @@ object OpenCvFilterProcessor {
                 (brightness * 45.0).coerceIn(-45.0, 45.0)
             )
 
-            // Keep genuine colour in logos, stamps, seals and watermarks.  Avoid
-            // the old 1.45 chroma multiplier, which produced vivid colour fringing.
+            // Keep genuine colour in logos, stamps, seals and watermarks.
+            // A nearly white Y channel with the ORIGINAL paper's yellow/blue
+            // chroma still looks cream or gray. Whiten only bright, low-chroma
+            // regions; dark handwriting and saturated ink remain unchanged.
             val cr = temporary()
             val cb = temporary()
-            channels[1].convertTo(cr, CvType.CV_8U, 1.08, -10.24)
-            channels[2].convertTo(cb, CvType.CV_8U, 1.08, -10.24)
+            channels[1].convertTo(cr, CvType.CV_8U, 1.04, -5.12)
+            channels[2].convertTo(cb, CvType.CV_8U, 1.04, -5.12)
+
+            val paperGateYCrCb = temporary()
+            Core.merge(listOf(adjustedLum, cr, cb), paperGateYCrCb)
+            val paperMask = temporary()
+            Core.inRange(
+                paperGateYCrCb,
+                Scalar(MagicPaperTuning.PAPER_MIN_Y, MagicPaperTuning.PAPER_MIN_CR,
+                    MagicPaperTuning.PAPER_MIN_CB),
+                Scalar(255.0, MagicPaperTuning.PAPER_MAX_CR,
+                    MagicPaperTuning.PAPER_MAX_CB),
+                paperMask
+            )
+            val neutralizedCr = temporary()
+            val neutralizedCb = temporary()
+            val retained = MagicPaperTuning.PAPER_CHROMA_RETAINED
+            val neutralBias = 128.0 * (1.0 - retained)
+            cr.convertTo(neutralizedCr, CvType.CV_8U, retained, neutralBias)
+            cb.convertTo(neutralizedCb, CvType.CV_8U, retained, neutralBias)
+            neutralizedCr.copyTo(cr, paperMask)
+            neutralizedCb.copyTo(cb, paperMask)
+
             val resultYCrCb = temporary()
             Core.merge(listOf(adjustedLum, cr, cb), resultYCrCb)
             val resultRgb = temporary()
