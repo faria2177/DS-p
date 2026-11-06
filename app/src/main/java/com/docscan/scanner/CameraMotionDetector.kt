@@ -25,7 +25,8 @@ enum class CameraState {
 class CameraMotionDetector(
     private val gridSize: Int = 16,
     private val baseStillnessThreshold: Int = 7,
-    private val requiredStableFrames: Int = 6
+    // Fast manual scan readiness after three quiet preview frames.
+    private val requiredStableFrames: Int = 3
 ) {
     private var prevGrid: IntArray? = null
     private var stableFrameCount = 0

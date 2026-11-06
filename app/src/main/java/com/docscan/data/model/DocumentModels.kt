@@ -31,11 +31,23 @@ enum class IdCardType(
     val subtitle: String,
     val isTwoSided: Boolean
 ) {
-    GENERAL("General", "Standard 2-sided identity card", true),
-    ID_CARD("NID Card", "National ID card front & back", true),
+    GENERAL("General", "Single card copy on A4 paper", false),
+    ID_CARD("ID Card", "National ID card front & back", true),
     DRIVER_LICENSE("Driver License", "Driving license card front & back", true),
     PASSPORT("Passport", "Passport data page on A4", false),
-    BANK_CARD("Bank Card", "Credit / Debit card front & back", true)
+    BANK_CARD("Bank Card", "Credit / Debit card front & back", true),
+    CERTIFICATE("Certificate", "Certificate pages on A4 sheets", false);
+
+    /** Null means unlimited pages. Keep this policy shared by camera and gallery imports. */
+    val maximumPages: Int?
+        get() = when (this) {
+            ID_CARD, DRIVER_LICENSE, BANK_CARD -> 2
+            CERTIFICATE -> null
+            GENERAL, PASSPORT -> 1
+        }
+
+    fun remainingPages(alreadyCaptured: Int): Int? =
+        maximumPages?.let { (it - alreadyCaptured).coerceAtLeast(0) }
 }
 
 @Entity(tableName = "documents")

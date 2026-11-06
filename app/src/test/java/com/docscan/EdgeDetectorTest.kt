@@ -56,4 +56,41 @@ class EdgeDetectorTest {
         assertNotNull(corners)
         assertEquals(4, corners.size)
     }
+
+    @Test
+    fun `capture without a detectable document never trims off photo edges`() {
+        val bitmap = Bitmap.createBitmap(320, 480, Bitmap.Config.ARGB_8888)
+        Canvas(bitmap).drawColor(Color.rgb(20, 20, 20))
+
+        val corners = EdgeDetector.detectCapturedPhotoCorners(bitmap)
+        assertEquals(4, corners.size)
+        assertEquals(0f, corners[0].x, 0.001f)
+        assertEquals(0f, corners[0].y, 0.001f)
+        assertEquals(1f, corners[2].x, 0.001f)
+        assertEquals(1f, corners[2].y, 0.001f)
+    }
+
+    @Test
+    fun `full printed form is preferred over its inner table rectangles`() {
+        val bitmap = Bitmap.createBitmap(700, 1000, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(Color.rgb(44, 49, 49))
+        val fill = Paint().apply { color = Color.rgb(244, 245, 240); style = Paint.Style.FILL }
+        val lines = Paint().apply {
+            color = Color.rgb(50, 70, 63)
+            style = Paint.Style.STROKE
+            strokeWidth = 5f
+        }
+        canvas.drawRect(92f, 110f, 608f, 890f, fill)
+        canvas.drawRect(92f, 110f, 608f, 890f, lines)
+        // Form fields are intentionally sharper/darker than the sheet edge.
+        canvas.drawRect(185f, 270f, 515f, 690f, lines)
+        for (y in 330..660 step 55) canvas.drawLine(185f, y.toFloat(), 515f, y.toFloat(), lines)
+
+        val corners = EdgeDetector.detectDocumentCorners(bitmap)
+        val area = EdgeDetector.calculateQuadArea(corners[0], corners[1], corners[2], corners[3])
+        assertTrue("Detected page should contain the full printed form, not a table cell", area > 0.34f)
+        assertTrue("Top-left should not be inside form fields", corners[0].x < 0.23f && corners[0].y < 0.23f)
+    }
+
 }

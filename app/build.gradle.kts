@@ -96,7 +96,6 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
   implementation(libs.mlkit.text.recognition)
-  implementation(libs.mlkit.document.scanner)
   implementation(libs.mlkit.barcode.scanning)
   implementation(libs.mlkit.face.detection)
   implementation(libs.zxing.core)

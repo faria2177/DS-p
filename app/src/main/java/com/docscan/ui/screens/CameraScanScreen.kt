@@ -1,7 +1,6 @@
 package com.docscan.ui.screens
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -12,7 +11,6 @@ import android.view.ViewGroup
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
@@ -63,6 +61,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -94,6 +94,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -116,10 +117,12 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
@@ -134,6 +137,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
@@ -155,7 +160,6 @@ import com.docscan.data.model.ScannerFeatureMode
 import com.docscan.ui.components.CreateQrBottomSheet
 import com.docscan.ui.components.GalleryCodeSelectionDialog
 import com.docscan.ui.components.IdCardIntroOverlay
-import com.docscan.ui.components.ModernScanModeSwitcher
 import com.docscan.ui.components.QrContinuousScanBar
 import com.docscan.ui.components.QrHistoryBottomSheet
 import com.docscan.ui.components.QrResultBottomSheet
@@ -170,10 +174,8 @@ import com.docscan.util.BarcodeAnalyzerHelper
 import com.docscan.scanner.PremiumDetectionResult
 import com.docscan.util.DetectionState
 import com.docscan.util.FileUtils
-import com.docscan.util.MlKitDocumentScannerHelper
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -199,6 +201,7 @@ fun CameraScanScreen(
     onNavigateBack: () -> Unit,
     onNavigateToCrop: () -> Unit,
     onNavigateToDocumentPreview: () -> Unit,
+    onNavigateToNidSetup: () -> Unit = {},
     onNidSideCaptured: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -209,7 +212,6 @@ fun CameraScanScreen(
     val scanMode by viewModel.scanMode.collectAsStateWithLifecycle()
     val activeFeatureMode by viewModel.activeFeatureMode.collectAsStateWithLifecycle()
     val capturedPages by viewModel.capturedPages.collectAsStateWithLifecycle()
-    val isAutoCaptureEnabled by viewModel.isAutoCaptureEnabled.collectAsStateWithLifecycle()
     val isMagicEnhanceEnabled by viewModel.isMagicEnhanceEnabled.collectAsStateWithLifecycle()
     val isHdModeEnabled by viewModel.isHdModeEnabled.collectAsStateWithLifecycle()
     val isAutoCropEnabled by viewModel.isAutoCropEnabled.collectAsStateWithLifecycle()
@@ -224,6 +226,12 @@ fun CameraScanScreen(
 
     // QR & Barcode Mode State Observers
     val mainScanMode by viewModel.mainScanMode.collectAsStateWithLifecycle()
+    // Only the document camera is letterboxed by the top and bottom controls.
+    // A full-height FILL_CENTER preview crops the 4:3 sensor horizontally and
+    // makes a page look artificially zoomed-in on tall phones.
+    val useDocumentViewfinder = mainScanMode == MainScanMode.DOCUMENT && !isNidCaptureMode
+    // CameraX binds its analyzer once; read the latest mode without rebinding the camera.
+    val latestMainScanMode by rememberUpdatedState(mainScanMode)
     val qrScanSubMode by viewModel.qrScanSubMode.collectAsStateWithLifecycle()
     val isWideBarcodeMode by viewModel.isWideBarcodeMode.collectAsStateWithLifecycle()
     val activeScannedBarcode by viewModel.activeScannedBarcode.collectAsStateWithLifecycle()
@@ -251,6 +259,7 @@ fun CameraScanScreen(
 
     var flashMode by remember { mutableStateOf(ImageCapture.FLASH_MODE_OFF) } // OFF, AUTO, ON
     var isTorchOn by remember { mutableStateOf(false) }
+    val latestTorchOn by rememberUpdatedState(isTorchOn)
     var showMoreMenu by remember { mutableStateOf(false) }
     var showAllFeaturesSheet by remember { mutableStateOf(false) }
     var isShutterBusy by remember { mutableStateOf(false) }
@@ -261,6 +270,8 @@ fun CameraScanScreen(
     var focusTapOffset by remember { mutableStateOf<Offset?>(null) }
     var showLowLightHint by remember { mutableStateOf(false) }
     var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
+    var rootBoundsInRoot by remember { mutableStateOf<Rect?>(null) }
+    var previewBoundsInRoot by remember { mutableStateOf<Rect?>(null) }
     val barcodeScanner = remember { BarcodeAnalyzerHelper.createScanner() }
 
     // Real-time edge detection frame state
@@ -282,7 +293,6 @@ fun CameraScanScreen(
 
     // Shutter flash visual feedback
     val flashAnim = remember { Animatable(0f) }
-    val lastAutoCaptureTime = remember { mutableStateOf(0L) }
 
     // Dedicated Single-Image Gallery Import for QR/Barcode scanning
     val qrGalleryLauncher = rememberLauncherForActivityResult(
@@ -319,87 +329,40 @@ fun CameraScanScreen(
         }
     }
 
-    val activity = context as? Activity
-
-    // Google ML Kit Document Scanner Launcher with automatic edge detection
-    val mlKitScanLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { activityResult ->
-        if (activityResult.resultCode == Activity.RESULT_OK) {
-            val scanResult = MlKitDocumentScannerHelper.extractResult(activityResult.data)
-            if (scanResult != null && scanResult.imageUris.isNotEmpty()) {
-                val isIdCardResult = (scanMode == ScanMode.ID_CARD)
-                viewModel.processMlKitScanResult(
-                    scanResult = scanResult,
-                    isIdCardMode = isIdCardResult
-                ) {
-                    if (isIdCardResult) {
-                        onNavigateToDocumentPreview()
-                    } else {
-                        onNavigateToCrop()
-                    }
-                }
-            }
-        }
-    }
-
-    fun launchMlKitScanner() {
-        // ML Kit's external document-scanner UI is reserved for normal document
-        // scanning. NID uses the dedicated CameraX UI rendered by this screen.
-        if (isNidCaptureMode) {
-            Toast.makeText(context, "NID uses the custom Front / Back scanner", Toast.LENGTH_SHORT).show()
-            return
-        }
-        if (activity != null) {
-            val options = MlKitDocumentScannerHelper.createDocumentScannerOptions()
-            MlKitDocumentScannerHelper.startScanning(
-                activity = activity,
-                options = options,
-                onIntentSenderReady = { intentSender ->
-                    mlKitScanLauncher.launch(
-                        IntentSenderRequest.Builder(intentSender).build()
-                    )
-                },
-                onError = { e ->
-                    Toast.makeText(context, "ML Kit Scanner: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                }
-            )
-        } else {
-            Toast.makeText(context, "Cannot launch scanner in current window context", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     // Photo Gallery Import launcher
     val galleryLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            coroutineScope.launch(Dispatchers.IO) {
-                val bitmaps = mutableListOf<Bitmap>()
-                uris.forEach { uri ->
-                    val loaded = FileUtils.loadBitmapsFromUri(context, uri)
-                    bitmaps.addAll(loaded)
-                }
-                if (bitmaps.isNotEmpty()) {
-                    withContext(Dispatchers.Main) {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        if (isNidCaptureMode && isNidSetupCapture) {
-                            // The Scan ID landing page owns Front/Back selection. Gallery import
-                            // therefore fills only the selected side and returns to that page.
-                            viewModel.importNidSetupSide(bitmaps.first()) {
-                                onNidSideCaptured()
-                            }
-                        } else {
-                            viewModel.onMultipleImagesImported(
-                                bitmaps = bitmaps,
-                                onNavigateToCrop = { onNavigateToCrop() },
-                                onNavigateToPreview = { onNavigateToDocumentPreview() }
-                            )
-                        }
+            if (isNidCaptureMode && !isNidSetupCapture) {
+                viewModel.importIdCardUris(uris) { onNavigateToDocumentPreview() }
+            } else {
+                coroutineScope.launch(Dispatchers.IO) {
+                    val bitmaps = mutableListOf<Bitmap>()
+                    uris.forEach { uri ->
+                        val loaded = FileUtils.loadBitmapsFromUri(context, uri)
+                        bitmaps.addAll(loaded)
                     }
-                } else {
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Could not load selected file.", Toast.LENGTH_SHORT).show()
+                    if (bitmaps.isNotEmpty()) {
+                        withContext(Dispatchers.Main) {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            if (isNidCaptureMode && isNidSetupCapture) {
+                                // Legacy Scan ID landing: import into its selected side.
+                                viewModel.importNidSetupSide(bitmaps.first()) {
+                                    onNidSideCaptured()
+                                }
+                            } else {
+                                viewModel.onMultipleImagesImported(
+                                    bitmaps = bitmaps,
+                                    onNavigateToCrop = { onNavigateToCrop() },
+                                    onNavigateToPreview = { onNavigateToDocumentPreview() }
+                                )
+                            }
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(context, "Could not load selected file.", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             }
@@ -482,7 +445,7 @@ fun CameraScanScreen(
                             // frequently lock onto bedspread / inner ruled lines —
                             // the full still pipeline is far more accurate.
                             // ID Card mode keeps the fixed CR-80 frame.
-                            val activeCorners = if (scanMode == ScanMode.ID_CARD) {
+                            val activeCorners = if (scanMode == ScanMode.ID_CARD && selectedIdCardType.isTwoSided) {
                                 // Prefer the real live quad when the NID/card is detected.
                                 // If detection is temporarily unavailable, fall back to the fixed capture frame.
                                 if (detectedCorners.size == 4 &&
@@ -518,22 +481,21 @@ fun CameraScanScreen(
         )
     }
 
-    // Auto-capture watcher when document remains stable
-    LaunchedEffect(detectedState) {
-        if (isAutoCaptureEnabled && detectedState == DetectionState.DOCUMENT_STABLE && !isShutterBusy && !isProcessing) {
-            val now = System.currentTimeMillis()
-            if (now - lastAutoCaptureTime.value > 2500) {
-                lastAutoCaptureTime.value = now
-                delay(300) // Brief stability confirmation delay
-                capturePhoto()
-            }
-        }
-    }
-
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     DisposableEffect(Unit) {
         onDispose {
             cameraExecutor.shutdown()
+        }
+    }
+
+    // Clear tracking when the lens or scan mode changes. Run resets on the
+    // analyzer's executor to avoid racing an in-flight image-processing frame.
+    LaunchedEffect(lensFacing, mainScanMode) {
+        detectedCorners = emptyList()
+        detectedState = DetectionState.SEARCHING_DOCUMENT
+        cameraExecutor.execute {
+            motionDetector.reset()
+            BlueEdgeDetector.PremiumQuadTracker.reset()
         }
     }
 
@@ -566,13 +528,13 @@ fun CameraScanScreen(
                     .build()
 
                 imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                    if (mainScanMode == MainScanMode.QR_BARCODE) {
+                    if (latestMainScanMode == MainScanMode.QR_BARCODE) {
                         val mediaImage = imageProxy.image
                         if (mediaImage != null) {
                             val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
                             val avgLum = BarcodeAnalyzerHelper.computeAverageLuminance(imageProxy)
                             coroutineScope.launch(Dispatchers.Main) {
-                                showLowLightHint = (avgLum < 35.0 && !isTorchOn)
+                                showLowLightHint = (avgLum < 35.0 && !latestTorchOn)
                             }
                             barcodeScanner.process(inputImage)
                                 .addOnSuccessListener { barcodes ->
@@ -580,6 +542,7 @@ fun CameraScanScreen(
                                         val first = barcodes.first()
                                         val parsed = BarcodeAnalyzerHelper.parseBarcode(first)
                                         coroutineScope.launch(Dispatchers.Main) {
+                                            if (latestMainScanMode != MainScanMode.QR_BARCODE) return@launch
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                             viewModel.onBarcodeDetected(parsed)
                                         }
@@ -606,11 +569,13 @@ fun CameraScanScreen(
                         }
 
                         coroutineScope.launch(Dispatchers.Main) {
+                            // Drop in-flight results from the previous scan mode.
+                            if (latestMainScanMode == MainScanMode.QR_BARCODE) return@launch
                             if (detection.isDocumentDetected && detection.corners.size == 4) {
                                 detectedCorners = detection.corners
                                 detectedFrameAspect = detection.frameAspectRatio
                                 detectedState = when {
-                                    cameraState == CameraState.STABLE && detection.confidence >= 0.52f -> DetectionState.DOCUMENT_STABLE
+                                    cameraState == CameraState.STABLE && detection.confidence >= 0.48f -> DetectionState.DOCUMENT_STABLE
                                     else -> DetectionState.DOCUMENT_DETECTED
                                 }
                             } else {
@@ -642,13 +607,24 @@ fun CameraScanScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .onGloballyPositioned { rootBoundsInRoot = it.boundsInRoot() }
             .pointerInput(previewViewRef) {
                 detectTapGestures { offset ->
                     focusTapOffset = offset
                     previewViewRef?.let { pv ->
                         try {
+                            val previewBounds = previewBoundsInRoot
+                            val rootBounds = rootBoundsInRoot
+                            val previewOffset = if (previewBounds != null && rootBounds != null) {
+                                offset + rootBounds.topLeft - previewBounds.topLeft
+                            } else offset
+                            if (previewBounds != null &&
+                                (previewOffset.x !in 0f..previewBounds.width ||
+                                    previewOffset.y !in 0f..previewBounds.height)) {
+                                return@let
+                            }
                             val factory = pv.meteringPointFactory
-                            val point = factory.createPoint(offset.x, offset.y)
+                            val point = factory.createPoint(previewOffset.x, previewOffset.y)
                             val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE).build()
                             camera?.cameraControl?.startFocusAndMetering(action)
                         } catch (e: Exception) {
@@ -665,22 +641,26 @@ fun CameraScanScreen(
                 }
             }
     ) {
-        if (hasCameraPermission) {
-            // Live CameraX Preview
+        if (hasCameraPermission && !useDocumentViewfinder) {
+            // NID and barcode modes retain their original full-screen camera.
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onGloballyPositioned { previewBoundsInRoot = it.boundsInRoot() },
                 factory = { ctx ->
                     PreviewView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT
                         )
+                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                         scaleType = PreviewView.ScaleType.FILL_CENTER
                         previewViewRef = this
                     }
                 }
             )
-        } else {
+
+        } else if (!hasCameraPermission) {
             // Permission fallback message
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -807,16 +787,6 @@ fun CameraScanScreen(
                         )
                     }
                 }
-            } else if (!isNidCaptureMode) {
-                ModernScanModeSwitcher(
-                    selectedMode = mainScanMode,
-                    onModeSelected = { newMode ->
-                        viewModel.mainScanMode.value = newMode
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                )
             }
 
             if (mainScanMode == MainScanMode.DOCUMENT) {
@@ -824,7 +794,9 @@ fun CameraScanScreen(
                 if (isNidCaptureMode) {
                     NidReferenceTopBar(
                         isTorchOn = isTorchOn,
+                        isHdEnabled = isHdModeEnabled,
                         onCloseClick = onNavigateBack,
+                        onHdClick = { viewModel.isHdModeEnabled.value = !isHdModeEnabled },
                         onFlashClick = {
                             val nextTorch = !isTorchOn
                             isTorchOn = nextTorch
@@ -853,10 +825,8 @@ fun CameraScanScreen(
                         onHdClick = {
                             viewModel.isHdModeEnabled.value = !isHdModeEnabled
                         },
-                        onMlKitScanClick = {
-                            launchMlKitScanner()
-                        },
-                        onMoreClick = { showMoreMenu = true }
+                        onMoreClick = { showMoreMenu = true },
+                        modifier = Modifier.padding(bottom = 12.dp)
                     )
                 }
 
@@ -867,25 +837,6 @@ fun CameraScanScreen(
                         onDismissRequest = { showMoreMenu = false },
                         modifier = Modifier.background(Color(0xFF1E2022))
                     ) {
-                        DropdownMenuItem(
-                            text = {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Default.DocumentScanner, contentDescription = null, tint = ScannerTealBright, modifier = Modifier.size(18.dp))
-                                    Column {
-                                        Text("ML Kit Auto Scanner", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                                        Text("Google AI edge detection & auto-crop", color = Color.Gray, fontSize = 11.sp)
-                                    }
-                                }
-                            },
-                            onClick = {
-                                showMoreMenu = false
-                                launchMlKitScanner()
-                            }
-                        )
                         DropdownMenuItem(
                             text = {
                                 Row(
@@ -902,23 +853,6 @@ fun CameraScanScreen(
                                 }
                             },
                             onClick = { viewModel.showGridGuidelines.value = !showGridGuidelines }
-                        )
-                        DropdownMenuItem(
-                            text = {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("Auto Capture", color = Color.White, fontSize = 14.sp)
-                                    Switch(
-                                        checked = isAutoCaptureEnabled,
-                                        onCheckedChange = { viewModel.isAutoCaptureEnabled.value = it },
-                                        colors = SwitchDefaults.colors(checkedThumbColor = ScannerTeal, checkedTrackColor = ScannerTeal.copy(alpha = 0.5f))
-                                    )
-                                }
-                            },
-                            onClick = { viewModel.isAutoCaptureEnabled.value = !isAutoCaptureEnabled }
                         )
                         DropdownMenuItem(
                             text = {
@@ -969,23 +903,48 @@ fun CameraScanScreen(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                        .clipToBounds()
                 ) {
+                    if (hasCameraPermission && useDocumentViewfinder) {
+                        // Camera and quadrilateral use the identical center
+                        // viewport. This avoids the full-screen center crop
+                        // while retaining accurate preview-to-edge mapping.
+                        AndroidView(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .onGloballyPositioned { previewBoundsInRoot = it.boundsInRoot() },
+                            factory = { ctx ->
+                                PreviewView(ctx).apply {
+                                    layoutParams = ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    // TextureView respects Compose's clip and
+                                    // prevents camera surface from covering the
+                                    // bottom half of the top toolbar.
+                                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                                    previewViewRef = this
+                                }
+                            }
+                        )
+                        BlueEdgeOverlay(
+                            corners = detectedCorners,
+                            state = detectedState,
+                            scanMode = scanMode,
+                            idCardStep = idCardStep,
+                            idCardType = selectedIdCardType,
+                            showGrid = showGridGuidelines,
+                            frameAspectRatio = detectedFrameAspect,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     if (hasCameraPermission) {
-                        if (isNidCaptureMode) {
+                        if (isNidCaptureMode && !showIdCardIntro) {
                             NidReferenceViewfinder(
                                 state = detectedState,
                                 idCardStep = idCardStep,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            BlueEdgeOverlay(
-                                corners = detectedCorners,
-                                state = detectedState,
-                                scanMode = scanMode,
-                                idCardStep = idCardStep,
                                 idCardType = selectedIdCardType,
-                                showGrid = showGridGuidelines,
-                                frameAspectRatio = detectedFrameAspect,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -1032,7 +991,7 @@ fun CameraScanScreen(
                         val guideInfo = when {
                             detectedState == DetectionState.DOCUMENT_STABLE -> {
                                 AlignmentGuideInfo(
-                                    if (isAutoCaptureEnabled) "Document Aligned • Capturing..." else "Document Aligned ✓ Ready",
+                                    "Document Ready • Tap to Scan",
                                     Icons.Default.Check,
                                     Color(0xFF28D8A1).copy(alpha = 0.95f),
                                     Color.White,
@@ -1041,7 +1000,7 @@ fun CameraScanScreen(
                             }
                             detectedState == DetectionState.DOCUMENT_DETECTED -> {
                                 AlignmentGuideInfo(
-                                    "Hold Steady • Aligning Document...",
+                                    "Document Found • Adjusting Edges",
                                     Icons.Default.AutoFixHigh,
                                     Color(0xDD0F172A),
                                     Color(0xFF28D8A1),
@@ -1050,7 +1009,7 @@ fun CameraScanScreen(
                             }
                             else -> {
                                 AlignmentGuideInfo(
-                                    "Point at document & hold steady",
+                                    "Point camera at document",
                                     Icons.Default.DocumentScanner,
                                     Color(0xAA111827),
                                     Color(0xFFD1D5DB),
@@ -1101,11 +1060,15 @@ fun CameraScanScreen(
                 if (isNidCaptureMode) {
                     NidReferenceBottomControls(
                         isShutterBusy = isShutterBusy || isProcessing,
-                        isAutoCaptureEnabled = isAutoCaptureEnabled,
                         idCardStep = idCardStep,
+                        selectedType = selectedIdCardType,
+                        pageCount = capturedPages.size,
+                        onUndoClick = { viewModel.undoLastIdCardCapture() },
+                        onDoneClick = {
+                            if (capturedPages.isNotEmpty()) onNavigateToDocumentPreview()
+                        },
                         onGalleryClick = { galleryLauncher.launch("image/*") },
                         onShutterClick = { capturePhoto() },
-                        onAutoCaptureChange = { enabled -> viewModel.isAutoCaptureEnabled.value = enabled },
                         modifier = Modifier
                             .fillMaxWidth()
                             .windowInsetsPadding(WindowInsets.navigationBars)
@@ -1147,6 +1110,7 @@ fun CameraScanScreen(
                                 when (feature) {
                                     ScannerFeatureMode.ID_CARDS -> {
                                         viewModel.enterNidCardMode()
+                                        viewModel.showIdCardIntro.value = true
                                     }
                                     ScannerFeatureMode.SCAN -> {
                                         viewModel.showIdCardIntro.value = false
@@ -1261,6 +1225,122 @@ fun CameraScanScreen(
             }
         }
 
+        // The ID Cards landing screen floats above the live preview, as in the supplied
+        // reference.  Selection is kept in the ViewModel and used by the actual scanner.
+        if (isNidCaptureMode && showIdCardIntro && !isNidSetupCapture) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0x88000000))
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+            ) {
+                Spacer(Modifier.height(32.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                        .background(Color.Black)
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = {
+                        viewModel.showIdCardIntro.value = false
+                        onNavigateBack()
+                    }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close ID Cards", tint = Color.White)
+                    }
+                    Spacer(Modifier.weight(1f))
+                    IconButton(onClick = {
+                        val enabled = !isTorchOn
+                        isTorchOn = enabled
+                        camera?.cameraControl?.enableTorch(enabled)
+                    }) {
+                        Icon(
+                            if (isTorchOn) Icons.Default.FlashOn else Icons.Default.FlashOff,
+                            contentDescription = "Toggle flashlight",
+                            tint = if (isTorchOn) Color.Yellow else Color.White
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(5.dp),
+                        color = if (isHdModeEnabled) ScannerTeal else Color(0xFF32353B),
+                        modifier = Modifier.clickable {
+                            viewModel.isHdModeEnabled.value = !isHdModeEnabled
+                        }
+                    ) {
+                        Text("HD", color = if (isHdModeEnabled) Color.Black else Color.White,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp))
+                    }
+                    Box {
+                        IconButton(onClick = { showMoreMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More camera options", tint = Color.White)
+                        }
+                        DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(if (isHdModeEnabled) "Turn HD off" else "Turn HD on") },
+                                onClick = {
+                                    viewModel.isHdModeEnabled.value = !isHdModeEnabled
+                                    showMoreMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                    IdCardIntroOverlay(
+                        selectedType = selectedIdCardType,
+                        onTypeSelected = { viewModel.selectedIdCardType.value = it },
+                        onMakeItNow = {
+                            viewModel.beginSelectedIdCardCapture()
+                        },
+                        modifier = Modifier.offset(y = (-14).dp)
+                    )
+                }
+                // ID Cards reference screenshots contain only Scan and ID Cards.
+                // Keep unrelated camera tools and the All Features deck hidden.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                        .padding(top = 2.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    listOf("Scan", "ID Cards").forEachIndexed { index, tab ->
+                        if (index > 0) Spacer(Modifier.width(28.dp))
+                        val selected = tab == "ID Cards"
+                        Column(
+                            modifier = Modifier.clickable {
+                                if (tab == "Scan") {
+                                    viewModel.showIdCardIntro.value = false
+                                    viewModel.scanMode.value = ScanMode.SINGLE
+                                    viewModel.activeFeatureMode.value = ScannerFeatureMode.SCAN
+                                }
+                            },
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(34.dp)
+                                    .height(3.dp)
+                                    .background(if (selected) ScannerTeal else Color.Transparent, RoundedCornerShape(2.dp))
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = tab,
+                                color = if (selected) ScannerTeal else Color(0xFFBEBEC1),
+                                fontSize = 14.sp,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.fillMaxWidth().height(116.dp).background(Color.Black))
+            }
+        }
+
         // QR / BARCODE MODAL BOTTOM SHEETS & DIALOGS
         activeScannedBarcode?.let { result ->
             QrResultBottomSheet(
@@ -1331,6 +1411,7 @@ fun CameraScanScreen(
                         "ID Card" -> {
                             viewModel.mainScanMode.value = MainScanMode.DOCUMENT
                             viewModel.enterNidCardMode()
+                            viewModel.showIdCardIntro.value = true
                         }
                         "Translate" -> {
                             viewModel.mainScanMode.value = MainScanMode.DOCUMENT
@@ -1367,17 +1448,20 @@ fun CameraScanScreen(
 @Composable
 fun NidReferenceTopBar(
     isTorchOn: Boolean,
+    isHdEnabled: Boolean,
     onCloseClick: () -> Unit,
     onFlashClick: () -> Unit,
+    onHdClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showCameraMenu by remember { mutableStateOf(false) }
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xEE050505))
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .background(Color.Black)
+            .padding(top = 42.dp, start = 14.dp, end = 14.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         IconButton(
             onClick = onCloseClick,
@@ -1385,18 +1469,13 @@ fun NidReferenceTopBar(
         ) {
             Icon(
                 Icons.Default.Close,
-                contentDescription = "Close NID scanner",
+                contentDescription = "Close card scanner",
                 tint = Color.White,
                 modifier = Modifier.size(29.dp)
             )
         }
 
-        Text(
-            text = "Scan document",
-            color = Color.White,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold
-        )
+        Spacer(Modifier.weight(1f))
 
         IconButton(
             onClick = onFlashClick,
@@ -1408,6 +1487,33 @@ fun NidReferenceTopBar(
                 tint = if (isTorchOn) Color(0xFFFFD54F) else Color.White,
                 modifier = Modifier.size(27.dp)
             )
+        }
+        Surface(
+            color = if (isHdEnabled) Color.White else Color(0xFF36383D),
+            shape = RoundedCornerShape(4.dp),
+            modifier = Modifier.clickable(onClick = onHdClick)
+        ) {
+            Text(
+                "HD",
+                color = if (isHdEnabled) Color.Black else Color.White,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Black,
+                modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp)
+            )
+        }
+        Box {
+            IconButton(onClick = { showCameraMenu = true }) {
+                Icon(Icons.Default.MoreVert, contentDescription = "Camera options", tint = Color.White)
+            }
+            DropdownMenu(
+                expanded = showCameraMenu,
+                onDismissRequest = { showCameraMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text(if (isHdEnabled) "Disable HD" else "Enable HD") },
+                    onClick = { onHdClick(); showCameraMenu = false }
+                )
+            }
         }
     }
 }
@@ -1422,10 +1528,10 @@ fun NidReferenceTopBar(
 fun NidReferenceViewfinder(
     state: DetectionState,
     idCardStep: Int,
+    idCardType: IdCardType = IdCardType.ID_CARD,
     modifier: Modifier = Modifier
 ) {
-    val detected = state == DetectionState.DOCUMENT_DETECTED || state == DetectionState.DOCUMENT_STABLE
-    val accent = Color(0xFF29BFF4)
+    val accent = Color.White
 
     Box(modifier = modifier) {
         Canvas(modifier = Modifier.fillMaxSize()) {
@@ -1434,10 +1540,15 @@ fun NidReferenceViewfinder(
 
             // The reference frame is intentionally a little wider than a physical ID-1 card.
             // Perspective correction later normalizes the actual card to its correct ratio.
-            val frameW = w * 0.90f
-            val frameH = (frameW / 1.82f).coerceAtMost(h * 0.48f)
+            val isPortraitDocument = idCardType == IdCardType.CERTIFICATE || idCardType == IdCardType.PASSPORT
+            val frameW = if (isPortraitDocument) w * 0.92f else w * 0.90f
+            val frameH = if (isPortraitDocument) {
+                (frameW * 1.414f).coerceAtMost(h * 0.86f)
+            } else {
+                (frameW / 1.62f).coerceAtMost(h * 0.48f)
+            }
             val left = (w - frameW) / 2f
-            val top = (h * 0.43f - frameH / 2f).coerceAtLeast(h * 0.12f)
+            val top = (h - frameH) / 2f
             val rect = Rect(left, top, left + frameW, top + frameH)
 
             // Gentle dim outside the guide to create the reference scanner look.
@@ -1445,7 +1556,14 @@ fun NidReferenceViewfinder(
             val inner = Path().apply { addRoundRect(RoundRect(rect, CornerRadius(10.dp.toPx()))) }
             drawPath(
                 Path.combine(androidx.compose.ui.graphics.PathOperation.Difference, outer, inner),
-                Color(0x2E000000)
+                Color(0x68000000)
+            )
+
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.11f),
+                topLeft = Offset(rect.left, rect.top),
+                size = Size(rect.width, rect.height),
+                cornerRadius = CornerRadius(10.dp.toPx())
             )
 
             // Very thin neutral frame line.
@@ -1475,179 +1593,132 @@ fun NidReferenceViewfinder(
             drawLine(accent, Offset(rect.right, rect.bottom - len), Offset(rect.right, rect.bottom - r), sw)
         }
 
-        Surface(
-            shape = RoundedCornerShape(22.dp),
-            color = if (detected) Color(0xFF087FC8) else Color(0xB3151A20),
-            border = if (detected) null else androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-            modifier = Modifier
-                .align(Alignment.Center)
-                .offset(y = 112.dp)
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    Icons.Default.Description,
-                    contentDescription = null,
-                    tint = if (detected) Color(0xFFDDF5FF) else Color(0xFFB7C1CC),
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(
-                    text = if (detected) "Document detected" else if (idCardStep == 1) "Align front side" else "Align back side",
-                    color = if (detected) Color.White else Color(0xFFD1D5DB),
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
+        val guideLabel = when {
+            idCardType.isTwoSided -> if (idCardStep == 1) "Front" else "Back"
+            idCardType == IdCardType.CERTIFICATE -> "Rotate your device and fit the document into the borders"
+            else -> "Fit it into the borders"
         }
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0x880D0F15),
+            modifier = Modifier.align(Alignment.TopCenter).padding(top = 22.dp, start = 12.dp, end = 12.dp)
+        ) {
+            Text(
+                text = guideLabel,
+                color = Color.White,
+                fontSize = 15.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+        Text(
+            text = idCardType.title,
+            color = ScannerTeal,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
+        )
     }
 }
 
 /**
- * Dedicated NID bottom deck: gallery, large shutter and Manual/Auto capture switch.
- * Auto capture starts OFF whenever NID mode is entered, but can be enabled here.
+ * Dedicated NID bottom deck: gallery and manual shutter.
  */
 @Composable
 fun NidReferenceBottomControls(
     isShutterBusy: Boolean,
-    isAutoCaptureEnabled: Boolean,
     idCardStep: Int,
+    selectedType: IdCardType,
+    pageCount: Int,
+    onUndoClick: () -> Unit,
+    onDoneClick: () -> Unit,
     onGalleryClick: () -> Unit,
     onShutterClick: () -> Unit,
-    onAutoCaptureChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val blue = Color(0xFF29BFF4)
-
     Surface(
-        color = Color(0xF20B0D10),
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        color = Color.Black,
         modifier = modifier
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 20.dp, bottom = 14.dp),
+                .padding(top = 12.dp, bottom = 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceEvenly
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Surface(
-                    shape = CircleShape,
-                    color = Color.Transparent,
-                    border = androidx.compose.foundation.BorderStroke(2.5.dp, Color.White),
-                    modifier = Modifier
-                        .size(72.dp)
-                        .clickable { onGalleryClick() }
+                IconButton(
+                    onClick = onUndoClick,
+                    modifier = Modifier.size(58.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Default.Image,
-                            contentDescription = "Import NID from gallery",
-                            tint = Color.White,
-                            modifier = Modifier.size(28.dp)
-                        )
-                    }
+                    Icon(
+                        Icons.Default.Undo,
+                        contentDescription = "Undo last card image or return to card types",
+                        tint = Color.White,
+                        modifier = Modifier.size(32.dp)
+                    )
                 }
 
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(100.dp)
+                        .size(84.dp)
                         .clip(CircleShape)
                         .clickable(enabled = !isShutterBusy) { onShutterClick() }
-                        .border(4.dp, Color.White, CircleShape)
-                        .padding(9.dp)
-                        .border(2.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+                        .border(4.dp, ScannerTeal, CircleShape)
+                        .padding(7.dp)
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(72.dp)
+                            .size(66.dp)
                             .background(if (isShutterBusy) Color(0xFFB8B8B8) else Color.White, CircleShape)
                     )
                 }
 
-                // Symmetric spacer keeps the shutter visually centered like the reference UI.
-                Box(modifier = Modifier.size(72.dp), contentAlignment = Alignment.Center) {
+                Column(
+                    modifier = Modifier.width(82.dp).clickable(onClick = onGalleryClick),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Default.Image,
+                        contentDescription = "Import Images",
+                        tint = Color.White,
+                        modifier = Modifier.size(29.dp)
+                    )
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        text = if (idCardStep == 1) "Front" else "Back",
-                        color = Color.White.copy(alpha = 0.72f),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
+                        text = "Import Images",
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
-
-            Surface(
-                shape = RoundedCornerShape(28.dp),
-                color = Color(0xFF17191D),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        shape = RoundedCornerShape(26.dp),
-                        color = if (!isAutoCaptureEnabled) Color(0xFF2A2D31) else Color.Transparent,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(26.dp))
-                            .clickable { onAutoCaptureChange(false) }
-                    ) {
-                        Text(
-                            "Manual",
-                            color = if (!isAutoCaptureEnabled) Color.White else Color(0xFFD1D5DB),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 28.dp, vertical = 12.dp)
-                        )
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(26.dp),
-                        color = if (isAutoCaptureEnabled) Color(0xFF102A39) else Color.Transparent,
-                        border = if (isAutoCaptureEnabled) androidx.compose.foundation.BorderStroke(1.5.dp, blue) else null,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(26.dp))
-                            .clickable { onAutoCaptureChange(true) }
-                    ) {
-                        Text(
-                            "Auto capture",
-                            color = if (isAutoCaptureEnabled) blue else Color(0xFFD1D5DB),
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
-                        )
-                    }
+            if (selectedType == IdCardType.CERTIFICATE && pageCount > 0) {
+                Spacer(Modifier.height(14.dp))
+                Surface(
+                    color = ScannerTeal,
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier.clickable(enabled = !isShutterBusy, onClick = onDoneClick)
+                ) {
+                    Text(
+                        text = "Done • $pageCount page${if (pageCount == 1) "" else "s"}",
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 34.dp, vertical = 10.dp)
+                    )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 28.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
+            } else if (selectedType.isTwoSided && pageCount == 1) {
+                Spacer(Modifier.height(10.dp))
                 Text(
-                    text = "Doc Scanner will have access only to the images that you scan",
-                    color = Color(0xFFE5E7EB),
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Icon(
-                    Icons.Default.Info,
-                    contentDescription = "Privacy information",
-                    tint = Color.White.copy(alpha = 0.92f),
-                    modifier = Modifier.size(24.dp)
+                    text = "Front ready • Scan or import Back",
+                    color = Color(0xFFB7C2C9),
+                    fontSize = 12.sp
                 )
             }
         }
@@ -1667,7 +1738,6 @@ fun ScannerTopBar(
     onFlashClick: () -> Unit,
     onMagicEnhanceClick: () -> Unit,
     onHdClick: () -> Unit,
-    onMlKitScanClick: (() -> Unit)? = null,
     onMoreClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1693,37 +1763,6 @@ fun ScannerTopBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // ML Kit Auto-Scan Launcher Button
-            if (onMlKitScanClick != null) {
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = Color(0x7700BFA5),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ScannerTealBright.copy(alpha = 0.8f)),
-                    modifier = Modifier
-                        .height(36.dp)
-                        .clickable { onMlKitScanClick() }
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.DocumentScanner,
-                            contentDescription = "ML Kit Auto Scanner",
-                            tint = Color.White,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            "ML Kit",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp
-                        )
-                    }
-                }
-            }
-
             // Flash Toggle
             IconButton(
                 onClick = onFlashClick,

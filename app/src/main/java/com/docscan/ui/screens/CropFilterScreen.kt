@@ -80,6 +80,9 @@ import com.docscan.ui.viewmodel.ScannerViewModel
 import com.docscan.util.FileUtils
 import com.docscan.util.ImageProcessor
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @Composable
 fun CropFilterScreen(
@@ -100,24 +103,40 @@ fun CropFilterScreen(
 
     val currentPage = capturedPages[currentCropPageIndex]
     var currentBitmap by remember(currentPage.originalPath) {
-        mutableStateOf<Bitmap?>(FileUtils.loadBitmap(currentPage.originalPath))
+        mutableStateOf<Bitmap?>(null)
+    }
+    // Decoding a large camera JPEG must not block the Compose UI thread.
+    LaunchedEffect(currentPage.originalPath) {
+        currentBitmap = withContext(Dispatchers.IO) {
+            FileUtils.loadBitmap(currentPage.originalPath)
+        }
     }
 
     var activeTab by remember { mutableIntStateOf(0) } // 0 = Crop, 1 = Filter & Tone
-    var previewFilteredBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var previewFilteredBitmap by remember(currentPage.originalPath) { mutableStateOf<Bitmap?>(null) }
     var showFolderDialog by remember { mutableStateOf(false) }
 
-    // Real-time preview update when filters or crop change
-    LaunchedEffect(currentPage.filterType, currentPage.brightness, currentPage.contrast, currentPage.rotationDegrees, activeTab, currentBitmap) {
+    // The saved document rotates the original *before* perspective cropping.
+    // Keep the on-screen result identical, and do expensive image work off the UI thread.
+    LaunchedEffect(
+        currentBitmap, currentPage.corners, currentPage.filterType,
+        currentPage.brightness, currentPage.contrast, currentPage.rotationDegrees, activeTab
+    ) {
+        if (activeTab != 1) return@LaunchedEffect
         val src = currentBitmap ?: return@LaunchedEffect
-        val cropped = ImageProcessor.perspectiveCrop(src, currentPage.corners)
-        val rotated = ImageProcessor.rotate(cropped, currentPage.rotationDegrees)
-        val filtered = ImageProcessor.applyFilter(
-            source = rotated,
-            filterType = currentPage.filterType,
-            brightness = currentPage.brightness,
-            contrast = currentPage.contrast
-        )
+        val corners = currentPage.corners.toList()
+        val rotation = currentPage.rotationDegrees
+        val filter = currentPage.filterType
+        val brightness = currentPage.brightness
+        val contrast = currentPage.contrast
+        // Rapid slider/crop changes cancel the previous preview before starting new work.
+        delay(65)
+        val filtered = withContext(Dispatchers.Default) {
+            val previewSource = src.scaledForScanPreview(1600)
+            val rotated = ImageProcessor.rotate(previewSource, rotation)
+            val cropped = ImageProcessor.perspectiveCrop(rotated, corners)
+            ImageProcessor.applyFilter(cropped, filter, brightness, contrast)
+        }
         previewFilteredBitmap = filtered
     }
 
@@ -132,16 +151,20 @@ fun CropFilterScreen(
         Pair(FilterType.LIGHTEN, "Lighten")
     )
 
-    // Thumbnail base for fast live filter previews
-    var miniThumbnailBase by remember { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(currentBitmap, currentPage.corners, currentPage.rotationDegrees) {
+    // Generate filter thumbnails only when the filter tab is open. Large image
+    // warps during every crop-handle drag previously caused visible jank.
+    var miniThumbnailBase by remember(currentPage.originalPath) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(currentBitmap, currentPage.corners, currentPage.rotationDegrees, activeTab) {
+        if (activeTab != 1) return@LaunchedEffect
         val src = currentBitmap ?: return@LaunchedEffect
-        val cropped = ImageProcessor.perspectiveCrop(src, currentPage.corners)
-        val rotated = ImageProcessor.rotate(cropped, currentPage.rotationDegrees)
-        val aspect = rotated.height.toFloat() / rotated.width.toFloat()
-        val thumbW = 100
-        val thumbH = (100 * aspect).toInt().coerceIn(70, 140)
-        miniThumbnailBase = Bitmap.createScaledBitmap(rotated, thumbW, thumbH, true)
+        val corners = currentPage.corners.toList()
+        val rotation = currentPage.rotationDegrees
+        miniThumbnailBase = withContext(Dispatchers.Default) {
+            val rotated = ImageProcessor.rotate(src.scaledForScanPreview(240), rotation)
+            val cropped = ImageProcessor.perspectiveCrop(rotated, corners)
+            val aspect = cropped.height.toFloat() / cropped.width.coerceAtLeast(1)
+            Bitmap.createScaledBitmap(cropped, 100, (100 * aspect).toInt().coerceIn(70, 140), true)
+        }
     }
 
     Box(
@@ -643,4 +666,17 @@ fun CropFilterScreen(
             }
         )
     }
+}
+
+/** A bounded preview keeps native OpenCV filters responsive on mid-range phones. */
+private fun Bitmap.scaledForScanPreview(maxDimension: Int): Bitmap {
+    val longest = maxOf(width, height)
+    if (longest <= maxDimension) return this
+    val scale = maxDimension.toFloat() / longest
+    return Bitmap.createScaledBitmap(
+        this,
+        (width * scale).toInt().coerceAtLeast(1),
+        (height * scale).toInt().coerceAtLeast(1),
+        true
+    )
 }

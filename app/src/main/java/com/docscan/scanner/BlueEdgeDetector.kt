@@ -21,6 +21,7 @@ import org.opencv.imgproc.Imgproc
 import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.max
@@ -56,6 +57,18 @@ object BlueEdgeDetector {
     private const val TARGET_LONG_SIDE = 720
     private const val MIN_LONG_SIDE = 360
 
+    // The fast median/Canny pass runs on every preview frame. A plausible
+    // partial notebook (plain cover half) must NOT suppress all the slower
+    // outer-border searches: those still run once per three preview frames.
+    private var liveFallbackSequence = 0L
+
+    @Synchronized
+    private fun fullLiveFallbackDue(): Boolean {
+        val runFull = liveFallbackSequence % 3L == 0L
+        liveFallbackSequence++
+        return runFull
+    }
+
     private val EPSILON_VALUES = floatArrayOf(0.012f, 0.018f, 0.025f, 0.035f, 0.048f)
 
     /**
@@ -68,9 +81,14 @@ object BlueEdgeDetector {
         private var trackCount = 0
         private var lostGraceFrames = 0
         private var consecutiveValidHits = 0
+        private var acquisitionMissFrames = 0
+        private var pendingCorners: List<Offset>? = null
+        private var pendingRelocation: List<Offset>? = null
+        private var pendingRelocationHits = 0
         private const val REQUIRED_HITS_TO_OPEN = 2 // Quick lock within 2 frames
-        private const val MAX_GRACE_FRAMES = 8      // Persists through 250ms of shake / motion blur
-        private const val DEADBAND_THRESHOLD = 0.0035f // Zero micro-jitter when holding steady
+        private const val MAX_ACQUISITION_GAP = 2 // A faint border may vanish on alternating frames
+        private const val MAX_GRACE_FRAMES = 12      // Bridge short focus / motion blur without box flicker
+        private const val DEADBAND_THRESHOLD = 0.006f // Ignore sub-pixel/noisy corner shifts at rest
 
         // One-Euro Filter State per corner (4 corners x 2 axes = 8 filters)
         private val xPrev = FloatArray(4)
@@ -80,12 +98,17 @@ object BlueEdgeDetector {
         private val initialized = BooleanArray(4)
         private var lastTimestampNanos = 0L
 
+        @Synchronized
         fun reset() {
             lastAcceptedCorners = null
             smoothedCorners = null
             trackCount = 0
             lostGraceFrames = 0
             consecutiveValidHits = 0
+            acquisitionMissFrames = 0
+            pendingCorners = null
+            pendingRelocation = null
+            pendingRelocationHits = 0
             for (i in 0..3) {
                 initialized[i] = false
                 xPrev[i] = 0f
@@ -96,12 +119,23 @@ object BlueEdgeDetector {
             lastTimestampNanos = 0L
         }
 
+        @Synchronized
         fun updateAndSmooth(newCorners: List<Offset>?, confidence: Float): Pair<List<Offset>?, Boolean> {
             val now = System.nanoTime()
 
-            val minConfidenceToAccept = if (trackCount > 0) 0.36f else 0.42f
+            val minConfidenceToAccept = if (trackCount > 0) 0.36f else 0.40f
             if (newCorners == null || confidence < minConfidenceToAccept || newCorners.size != 4) {
-                consecutiveValidHits = 0
+                pendingRelocation = null
+                pendingRelocationHits = 0
+                // A genuine paper border can be detected only every other
+                // analysis frame on textured desks or under moving shadows.
+                // Keep the *pending* shape briefly, without displaying it,
+                // so the next agreeing frame can open the box.
+                if (trackCount == 0 && pendingCorners != null &&
+                    acquisitionMissFrames < MAX_ACQUISITION_GAP) {
+                    acquisitionMissFrames++
+                    return Pair(null, false)
+                }
                 // If we recently tracked a valid quad, allow grace period for brief motion blur or hand adjustments
                 if (smoothedCorners != null && lostGraceFrames < MAX_GRACE_FRAMES && trackCount >= 2) {
                     lostGraceFrames++
@@ -112,11 +146,21 @@ object BlueEdgeDetector {
             }
 
             // A candidate was detected in this frame
-            consecutiveValidHits++
-            // If starting fresh from an empty screen, require 2 consecutive frames before opening the box
-            if (trackCount == 0 && consecutiveValidHits < REQUIRED_HITS_TO_OPEN) {
-                return Pair(null, false)
+            if (trackCount == 0) {
+                val pending = pendingCorners
+                val isSamePaper = pending != null &&
+                    alignToPreviousCorners(pending, newCorners).zip(pending).all { (a, b) ->
+                        hypot(a.x - b.x, a.y - b.y) < 0.16f
+                    }
+                consecutiveValidHits = if (isSamePaper) consecutiveValidHits + 1 else 1
+                pendingCorners = newCorners
+                acquisitionMissFrames = 0
+                if (consecutiveValidHits < REQUIRED_HITS_TO_OPEN) {
+                    return Pair(null, false)
+                }
             }
+            pendingCorners = null
+            consecutiveValidHits = 0
 
             lostGraceFrames = 0
             val currentLast = lastAcceptedCorners
@@ -127,13 +171,47 @@ object BlueEdgeDetector {
             } else {
                 newCorners
             }
+            val outerPageUpgrade = currentLast != null && confidence >= 0.48f &&
+                ScannerTuning.isLikelyOuterPageUpgrade(currentLast, alignedCorners)
 
-            // Drastic jump verification
-            if (currentLast != null && trackCount >= 4 && isDrasticJump(currentLast, alignedCorners)) {
-                if (confidence < 0.65f) {
-                    return Pair(smoothedCorners, true)
+            // A contour can temporarily latch onto one printed line, making
+            // exactly one corner collapse toward the middle of a steady page.
+            // BUT a newly found larger enclosing page must be allowed to fix
+            // that exact corner when the old quad was the one missing paper.
+            if (currentLast != null && trackCount >= 2 &&
+                !outerPageUpgrade && isIsolatedCornerWarp(currentLast, alignedCorners)) {
+                pendingRelocation = null
+                pendingRelocationHits = 0
+                return Pair(smoothedCorners, true)
+            }
+
+            // Upgrade an inner printed form to its enclosing sheet immediately.
+            // But a sudden jump to an inner box or unrelated object must be
+            // confirmed over several frames: accepting one high-confidence
+            // spurious contour caused the live outline to flicker wildly.
+            if (currentLast != null && trackCount >= 4 &&
+                isDrasticJump(currentLast, alignedCorners)) {
+                if (outerPageUpgrade) {
+                    for (i in initialized.indices) initialized[i] = false
+                } else {
+                    val previousProposal = pendingRelocation
+                    val matchesProposal = previousProposal != null &&
+                        alignToPreviousCorners(previousProposal, alignedCorners)
+                            .zip(previousProposal).all { (a, b) ->
+                                hypot(a.x - b.x, a.y - b.y) < 0.075f
+                            }
+                    pendingRelocationHits = if (matchesProposal) pendingRelocationHits + 1 else 1
+                    pendingRelocation = alignedCorners
+                    val requiredHits = if (confidence >= 0.65f) 3 else 4
+                    if (pendingRelocationHits < requiredHits) {
+                        return Pair(smoothedCorners, true)
+                    }
+                    // This is a real moved document, not a one-frame glitch.
+                    for (i in initialized.indices) initialized[i] = false
                 }
             }
+            pendingRelocation = null
+            pendingRelocationHits = 0
 
             // Deadband stillness check: If camera is steady, completely freeze coordinates (zero micro-jitter)
             val currentSmooth = smoothedCorners
@@ -147,6 +225,10 @@ object BlueEdgeDetector {
                 }
                 if (maxDist < DEADBAND_THRESHOLD) {
                     lastAcceptedCorners = alignedCorners
+                    lastTimestampNanos = now
+                    // A steady frame is still a valid hit. Without incrementing,
+                    // the tracker never arms its larger-page upgrade after settling.
+                    trackCount = (trackCount + 1).coerceAtMost(1000)
                     return Pair(currentSmooth, true)
                 }
             }
@@ -219,8 +301,10 @@ object BlueEdgeDetector {
             isX: Boolean
         ): Float {
             // Tuned for high stability and zero jitter at rest, with responsive tracking during panning
-            val minCutoff = 0.38f
-            val beta = 0.38f
+            // Steadier at rest; the derivative term still lets the frame follow
+            // a deliberate camera move instead of leaving the outline behind.
+            val minCutoff = 0.30f
+            val beta = 0.25f
             val dCutoff = 1.0f
 
             fun getAlpha(cutoff: Float, deltaT: Float): Float {
@@ -264,6 +348,14 @@ object BlueEdgeDetector {
             return maxDist > 0.25f || maxDeformation > 0.12f
         }
 
+        private fun isIsolatedCornerWarp(old: List<Offset>, new: List<Offset>): Boolean {
+            val movements = old.indices.map { i ->
+                hypot(new[i].x - old[i].x, new[i].y - old[i].y)
+            }.sortedDescending()
+            return movements.size == 4 && movements[0] >= 0.085f &&
+                movements[1] <= 0.035f
+        }
+
         fun defaultCorners(): List<Offset> = listOf(
             Offset(0.08f, 0.12f), Offset(0.92f, 0.12f),
             Offset(0.92f, 0.88f), Offset(0.08f, 0.88f)
@@ -283,11 +375,10 @@ object BlueEdgeDetector {
     fun analyzeImageProxy(imageProxy: ImageProxy): PremiumDetectionResult {
         val rotatedDegrees = imageProxy.imageInfo.rotationDegrees
 
-        val uprightAspect = if (rotatedDegrees == 90 || rotatedDegrees == 270) {
-            imageProxy.height.toFloat() / imageProxy.width.toFloat()
-        } else {
-            imageProxy.width.toFloat() / imageProxy.height.toFloat()
-        }
+        val isQuarterTurn = rotatedDegrees == 90 || rotatedDegrees == 270
+        val uprightWidth = if (isQuarterTurn) imageProxy.height else imageProxy.width
+        val uprightHeight = if (isQuarterTurn) imageProxy.width else imageProxy.height
+        val uprightAspect = uprightWidth.toFloat() / uprightHeight.coerceAtLeast(1)
 
         val detection = try {
             if (imageProxy.format == ImageFormat.YUV_420_888 && imageProxy.planes.isNotEmpty()) {
@@ -313,17 +404,21 @@ object BlueEdgeDetector {
         )
 
         if (isDetected && smoothedCorners != null && smoothedCorners.size == 4) {
+            // Detection points are normalized *after* rotating the YUV frame.
+            // Classify against the upright dimensions, not the sensor dimensions.
             val rawPts = smoothedCorners.map {
-                Point((it.x * imageProxy.width).toDouble(), (it.y * imageProxy.height).toDouble())
+                Point((it.x * uprightWidth).toDouble(), (it.y * uprightHeight).toDouble())
             }.toTypedArray()
 
-            val docType = classifyDocumentType(rawPts, imageProxy.width, imageProxy.height)
+            val docType = classifyDocumentType(rawPts, uprightWidth, uprightHeight)
 
             return PremiumDetectionResult(
                 corners = smoothedCorners,
                 isDocumentDetected = true,
                 frameAspectRatio = uprightAspect,
-                confidence = detection?.confidence ?: 0.75f,
+                // The tracker may briefly retain old corners during a missing frame.
+                // Never present that grace-period outline as a fresh confident capture.
+                confidence = detection?.confidence ?: 0f,
                 documentType = docType
             )
         }
@@ -416,7 +511,9 @@ object BlueEdgeDetector {
     private data class InternalCandidate(
         val rawPts: Array<Point>,
         val areaNorm: Float,
-        val confidence: Float
+        val confidence: Float,
+        val signedPaperContrast: Double,
+        val surfaceScore: Float
     )
 
     private fun detectFromYuv(
@@ -458,7 +555,7 @@ object BlueEdgeDetector {
                 0.0, 0.0, Imgproc.INTER_AREA
             )
 
-            return multiPassDocumentDetection(scaledMat, wW, wH)
+            return multiPassDocumentDetection(scaledMat, wW, wH, liveMode = true)
         } finally {
             rawMat?.release()
             rotatedMat?.release()
@@ -482,7 +579,8 @@ object BlueEdgeDetector {
     private fun multiPassDocumentDetection(
         grayMat: Mat,
         wW: Int,
-        wH: Int
+        wH: Int,
+        liveMode: Boolean = false
     ): InternalResult? {
         val frameArea = (wW * wH).toDouble()
         val candidateList = ArrayList<InternalCandidate>()
@@ -499,8 +597,10 @@ object BlueEdgeDetector {
         val highThresh = max(lowThresh + 28.0, median * 1.15).coerceIn(65.0, 180.0)
         Imgproc.Canny(claheMat, cannyEdgeMat, lowThresh, highThresh, 3, true)
         val cannyPixels = ByteArray(wW * wH * cannyEdgeMat.channels().coerceAtLeast(1))
+        val grayPixels = ByteArray(wW * wH)
         try {
             cannyEdgeMat.get(0, 0, cannyPixels)
+            grayMat.get(0, 0, grayPixels)
         } catch (_: Throwable) {}
 
         fun testAndRecordCandidate(ordered: Array<Point>, passWeight: Float = 1.0f) {
@@ -516,6 +616,8 @@ object BlueEdgeDetector {
             // Check 2: Convexity & basic geometry
             val geom = Corner.evaluateGeometry(ordered)
             if (!geom.isConvex || geom.score < 0.32) return
+            val minInteriorAngle = ScannerTuning.minInteriorAngleDegrees(ordered)
+            if (minInteriorAngle < 48.0) return
 
             // Check 3: Area must be between 3.5% and 98.5% of viewfinder
             val qArea = computeQuadAreaNorm(ordered, wW, wH)
@@ -543,14 +645,50 @@ object BlueEdgeDetector {
 
             // CamScanner resilience: Every side must have real contrast, but allow single-edge glare if 3 sides are strongly supported
             val sidesAboveMin = perSide.count { it >= 0.06 }
-            val isEdgeSupported = (minSideSupport >= ScannerTuning.MIN_SIDE_EDGE_SUPPORT && avgSideSupport >= ScannerTuning.MIN_AVG_EDGE_SUPPORT) ||
+            val boundaryContrast = ScannerTuning.boundaryContrast(grayMat, ordered)
+            val paperContrast = ScannerTuning.paperBoundaryPolarity(grayMat, ordered)
+            val surfaceScore = if (qArea >= 0.07f) {
+                ScannerTuning.pageSurfaceScore(grayPixels, wW, wH, ordered)
+            } else 0f
+            if (ScannerTuning.isLikelyPrintedInnerFrame(qArea, paperContrast, boundaryContrast)) {
+                return
+            }
+            val isEdgeSupported = (minSideSupport >= ScannerTuning.MIN_SIDE_EDGE_SUPPORT &&
+                    avgSideSupport >= ScannerTuning.MIN_AVG_EDGE_SUPPORT) ||
                     (sidesAboveMin >= 3 && avgSideSupport >= 0.16) ||
-                    (avgSideSupport >= 0.22)
+                    (avgSideSupport >= 0.22) ||
+                    // Full pages can have two faint borders against white paper.
+                    (qArea >= 0.24f && sidesAboveMin >= 2 &&
+                     avgSideSupport >= 0.10 && paperContrast >= 3.0) ||
+                    // White sheets on a light wooden table are frequently
+                    // low-Canny-edge despite their real brightness boundary.
+                    ScannerTuning.isSoftWhitePaperBoundary(
+                        qArea, paperContrast, boundaryContrast,
+                        sidesAboveMin, avgSideSupport
+                    ) ||
+                    // Grayish paper on a bright patterned table may be DARKER
+                    // than its background: texture separation, not polarity,
+                    // tells us whether it is a continuous physical sheet.
+                    ScannerTuning.isSoftLowTexturePageBoundary(
+                        qArea, paperContrast, boundaryContrast,
+                        sidesAboveMin, avgSideSupport, surfaceScore
+                    )
             if (!isEdgeSupported) return
 
-            // The quadrilateral must coincide with a real luminance transition
-            val boundaryContrast = ScannerTuning.boundaryContrast(grayMat, ordered)
-            if (boundaryContrast < ScannerTuning.MIN_BOUNDARY_CONTRAST && avgSideSupport < 0.24) return
+            // Thin printed form boxes lack a consistently brighter interior.
+            if (boundaryContrast < ScannerTuning.MIN_BOUNDARY_CONTRAST &&
+                avgSideSupport < 0.24 && paperContrast < 3.0) return
+
+            // The old average-only scoring accepted large quadrilaterals with
+            // a fourth side running diagonally THROUGH a blank sheet. Test
+            // each physical border, after the cheap filters to limit overhead.
+            val sidePaperContrast = ScannerTuning.sidePaperBoundaryPolarity(grayMat, ordered)
+            if (!ScannerTuning.hasPhysicalFourSideBoundary(
+                    perSide, sidePaperContrast, minInteriorAngle, qArea
+                )) return
+            val strongPhysicalSides = perSide.indices.count { side ->
+                perSide[side] >= 0.065 || abs(sidePaperContrast[side]) >= 6.0
+            }
 
             val geoScore = geom.score.toFloat().coerceIn(0f, 1f)
             val areaScore = when {
@@ -566,20 +704,63 @@ object BlueEdgeDetector {
             }
             val boundaryScore = (boundaryContrast / 25.0).toFloat().coerceIn(0f, 1f)
 
-            val confidence = (
+            val confidence = ((
                 0.24f * geoScore +
                 0.32f * avgSideSupport.toFloat().coerceIn(0f, 1f) +
                 0.15f * areaScore +
                 0.14f * aspectScore +
-                0.15f * boundaryScore
-            ).coerceIn(0f, 1f) * passWeight
+                0.15f * boundaryScore +
+                0.015f * strongPhysicalSides
+            ).coerceIn(0f, 1f) * passWeight +
+                ((if (surfaceScore >= 0.68f) abs(paperContrast) else paperContrast)
+                    / 35.0).coerceIn(0.0, 1.0).toFloat() * 0.12f +
+                (if (qArea >= 0.14f) 0.10f * surfaceScore else 0f)
+            ).coerceIn(0f, 1f)
 
             if (confidence >= 0.40f) {
-                candidateList.add(InternalCandidate(ordered, qArea, confidence))
+                candidateList.add(InternalCandidate(ordered, qArea, confidence, paperContrast, surfaceScore))
             }
         }
 
         try {
+            // FAST PATH: the smooth physical page gets first priority. This
+            // runs before the eight expensive contour / Hough / Scharr passes,
+            // so a clearly visible document can lock in 2 analysis frames.
+            val fastGray = Mat()
+            val fastEdges = Mat()
+            val fastClosed = Mat()
+            val fastKernel = Imgproc.getStructuringElement(
+                Imgproc.MORPH_RECT, Size(7.0, 7.0)
+            )
+            try {
+                Imgproc.medianBlur(grayMat, fastGray, 9)
+                Imgproc.Canny(fastGray, fastEdges, 21.0, 67.0)
+                Imgproc.morphologyEx(
+                    fastEdges, fastClosed, Imgproc.MORPH_CLOSE, fastKernel
+                )
+                extractContoursAndQuads(
+                    fastClosed, frameArea, retrievalMode = Imgproc.RETR_LIST
+                ) { quad -> testAndRecordCandidate(quad, passWeight = 1.13f) }
+            } finally {
+                fastGray.release()
+                fastEdges.release()
+                fastClosed.release()
+                fastKernel.release()
+            }
+
+            // A dark, two-tone notebook can produce a convincing FAST contour
+            // around just its smooth cover. Still run the outer-page Otsu/Hough
+            // passes periodically even with a quick candidate on this frame.
+            // Keep the rest of the frames lightweight for responsive preview.
+            val runFullRecovery = !liveMode || fullLiveFallbackDue()
+            // A valid fast quad must still be shown on lightweight frames,
+            // including textured pages whose surface score is below 0.62.
+            if (candidateList.isEmpty() && !runFullRecovery) {
+                return null
+            }
+            // For a captured still, preserve the exhaustive detector: no
+            // preview frame-rate deadline applies and crop accuracy wins.
+            if (runFullRecovery) {
             // --- PASS 0: CLAHE Local Adaptive Thresholding (Block size 25) ---
             val adaptMat0 = Mat()
             val kAdapt0 = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(9.0, 9.0))
@@ -609,7 +790,7 @@ object BlueEdgeDetector {
                 Imgproc.threshold(macroBlur, macroOtsu, 0.0, 255.0, Imgproc.THRESH_BINARY or Imgproc.THRESH_OTSU)
                 Imgproc.morphologyEx(macroOtsu, macroOtsu, Imgproc.MORPH_CLOSE, kMacroClose)
 
-                extractContoursAndQuads(macroOtsu, frameArea) { quad ->
+                extractContoursAndQuads(macroOtsu, frameArea, retrievalMode = Imgproc.RETR_LIST) { quad ->
                     testAndRecordCandidate(quad, passWeight = 1.15f)
                 }
             } finally {
@@ -627,7 +808,7 @@ object BlueEdgeDetector {
                 Imgproc.threshold(macroBlurInv, macroOtsuInv, 0.0, 255.0, Imgproc.THRESH_BINARY_INV or Imgproc.THRESH_OTSU)
                 Imgproc.morphologyEx(macroOtsuInv, macroOtsuInv, Imgproc.MORPH_CLOSE, kMacroCloseInv)
 
-                extractContoursAndQuads(macroOtsuInv, frameArea) { quad ->
+                extractContoursAndQuads(macroOtsuInv, frameArea, retrievalMode = Imgproc.RETR_LIST) { quad ->
                     testAndRecordCandidate(quad, passWeight = 1.10f)
                 }
             } finally {
@@ -717,6 +898,8 @@ object BlueEdgeDetector {
                 morphGradThresh.release()
                 kGrad.release()
             }
+
+            }
         } finally {
             claheMat.release()
             cannyEdgeMat.release()
@@ -729,7 +912,11 @@ object BlueEdgeDetector {
         // This eliminates any internal tables or text frames inside the paper.
         val outerCandidates = candidateList.filter { candA ->
             val isChildOfLarger = candidateList.any { candB ->
-                if (candB.areaNorm > candA.areaNorm * 1.25f) {
+                // A patterned notebook cover may be far less smooth than a
+                // plain-colored HALF of that same cover. If the larger quad
+                // really encloses the smaller candidate's center and already
+                // passed all four physical-border checks, it is the page.
+                if (candB.areaNorm > candA.areaNorm * 1.22f) {
                     val centerA = Point(
                         (candA.rawPts[0].x + candA.rawPts[1].x + candA.rawPts[2].x + candA.rawPts[3].x) / 4.0,
                         (candA.rawPts[0].y + candA.rawPts[1].y + candA.rawPts[2].y + candA.rawPts[3].y) / 4.0
@@ -752,20 +939,36 @@ object BlueEdgeDetector {
 
         val pool = if (outerCandidates.isNotEmpty()) outerCandidates else candidateList
         // CamScanner priority: prefer outer boundary candidate with highest combined confidence + area prior
-        val best = pool.maxByOrNull { it.confidence + (it.areaNorm * 0.12f) } ?: return null
+        val best = pool.maxByOrNull {
+            ScannerTuning.outerPagePriority(
+                it.confidence, it.areaNorm, it.signedPaperContrast, it.surfaceScore
+            )
+        } ?: return null
 
         if (best.confidence < 0.40f) return null
 
         // Sub-pixel refine corners on Canny edge map for razor sharp alignment
         val edgeMap = Mat()
         Imgproc.Canny(grayMat, edgeMap, 35.0, 115.0)
-        val refinedPts = try {
+        val proposedRefinement = try {
             CornerRefiner.refineCorners(grayMat = grayMat, edgeMat = edgeMap, quad = best.rawPts)
         } catch (_: Throwable) {
             best.rawPts
         } finally {
             edgeMap.release()
         }
+
+        // Refinement must not rotate corner indices or turn a valid page into
+        // a heavily distorted polygon. Use the already-validated contour if
+        // the corner optimizer cannot preserve its shape and correspondence.
+        val maxCornerDrift = hypot(wW.toDouble(), wH.toDouble()) * 0.032
+        val refinementSafe = proposedRefinement.size == 4 &&
+            proposedRefinement.indices.all { i ->
+                dist(proposedRefinement[i], best.rawPts[i]) <= maxCornerDrift
+            } &&
+            Corner.evaluateGeometry(proposedRefinement).isConvex &&
+            ScannerTuning.minInteriorAngleDegrees(proposedRefinement) >= 48.0
+        val refinedPts = if (refinementSafe) proposedRefinement else best.rawPts
 
         val normCorners = refinedPts.map {
             Offset(
@@ -925,11 +1128,14 @@ object BlueEdgeDetector {
     /**
      * Extracts contours and evaluates 4-corner candidates using multi-epsilon poly approximation,
      * thumb/finger occlusion recovery via dominant quad simplification, and convex hull bounding.
-     * Uses RETR_EXTERNAL so internal tables and text inside the paper are never treated as outer boundaries.
+     * The macro-luminance passes can request RETR_LIST to preserve a sheet
+     * boundary when its background touches the image border. Other passes
+     * retain RETR_EXTERNAL to avoid unnecessary inner-text work each frame.
      */
     private fun extractContoursAndQuads(
         edgeOrBinaryMat: Mat,
         frameArea: Double,
+        retrievalMode: Int = Imgproc.RETR_EXTERNAL,
         onCandidateFound: (Array<Point>) -> Unit
     ) {
         val contours = ArrayList<MatOfPoint>()
@@ -937,7 +1143,7 @@ object BlueEdgeDetector {
         try {
             Imgproc.findContours(
                 edgeOrBinaryMat, contours, hierarchy,
-                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE
+                retrievalMode, Imgproc.CHAIN_APPROX_SIMPLE
             )
             if (contours.isEmpty()) return
 
@@ -947,7 +1153,11 @@ object BlueEdgeDetector {
                 .take(14)
 
             for (contour in filtered) {
-                val c2f = MatOfPoint2f(*contour.toArray())
+                // OpenCV's toArray() allocates and copies the *entire* contour.
+                // Calling it once per hull vertex made large document outlines
+                // quadratic in work and could starve the next preview frame.
+                val contourPoints = contour.toArray()
+                val c2f = MatOfPoint2f(*contourPoints)
                 try {
                     val peri = Imgproc.arcLength(c2f, true)
 
@@ -978,7 +1188,7 @@ object BlueEdgeDetector {
                         Imgproc.convexHull(contour, hullIndices)
                         val hullPoints = Array(hullIndices.rows()) { idx ->
                             val ptIndex = hullIndices.get(idx, 0)[0].toInt()
-                            contour.toArray()[ptIndex]
+                            contourPoints[ptIndex]
                         }
                         val hull2f = MatOfPoint2f(*hullPoints)
                         try {
@@ -1056,7 +1266,7 @@ object BlueEdgeDetector {
 
             Imgproc.resize(gray, scaled, Size(wW.toDouble(), wH.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
 
-            return multiPassDocumentDetection(scaled, wW, wH)
+            return multiPassDocumentDetection(scaled, wW, wH, liveMode = true)
         } finally {
             rgba.release()
             gray.release()
@@ -1089,28 +1299,36 @@ object BlueEdgeDetector {
         val hist = IntArray(256)
         val maxSamples = 100_000
         val totalPixels = mat.rows() * mat.cols()
-        val step = max(1, sqrt(totalPixels.toDouble() / maxSamples).toInt())
-        val sampleW = max(1, mat.cols() / step)
-        val sampleH = max(1, mat.rows() / step)
-        val buf = ByteArray(sampleW * sampleH)
-        var bi = 0
-        var y = 0
-        while (y < mat.rows()) {
-            var x = 0
-            while (x < mat.cols()) {
-                buf[bi++] = mat.get(y, x)[0].toInt().toByte()
-                x += step
+        if (totalPixels <= 0) return 128.0
+
+        // ceil() keeps the number of samples bounded, including odd frame
+        // dimensions. The old floor-sized sample array could overflow when
+        // (width or height) % step != 0, aborting the entire live detection.
+        val step = medianSampleStep(mat.cols(), mat.rows(), maxSamples)
+        val rowPixels = ByteArray(mat.cols())
+        var sampleCount = 0
+        for (y in 0 until mat.rows() step step) {
+            mat.get(y, 0, rowPixels)
+            for (x in 0 until mat.cols() step step) {
+                hist[rowPixels[x].toInt() and 0xFF]++
+                sampleCount++
             }
-            y += step
         }
-        for (i in 0 until bi) hist[buf[i].toInt() and 0xFF]++
-        val mid = max(1, bi / 2)
+
+        val mid = (sampleCount + 1) / 2
         var total = 0
         for (i in hist.indices) {
             total += hist[i]
             if (total >= mid) return i.toDouble()
         }
         return 128.0
+    }
+
+    /** Sampling density independent of frame parity or camera sensor resolution. */
+    internal fun medianSampleStep(width: Int, height: Int, maxSamples: Int = 100_000): Int {
+        if (width <= 0 || height <= 0) return 1
+        val pixels = width.toDouble() * height.toDouble()
+        return ceil(sqrt(pixels / maxSamples.coerceAtLeast(1))).toInt().coerceAtLeast(1)
     }
 
     private fun dist(a: Point, b: Point): Double {

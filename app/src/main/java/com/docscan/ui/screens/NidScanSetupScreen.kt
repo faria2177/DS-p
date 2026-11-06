@@ -2,13 +2,6 @@ package com.docscan.ui.screens
 
 import com.docscan.util.ThemeManager
 
-import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -42,9 +35,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -53,7 +43,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -61,7 +50,6 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.docscan.ui.viewmodel.ScannerViewModel
-import com.docscan.util.MlKitDocumentScannerHelper
 import com.docscan.ui.viewmodel.TempScannedPage
 import java.io.File
 
@@ -75,69 +63,31 @@ private val NidBorder: Color get() = ThemeManager.themeColor(Color(0xFF475569), 
  * Reference-style NID front/back landing page.
  *
  * The landing page is app-owned so it can match the reference UI exactly. Each Front/Back card
- * launches Google ML Kit Document Scanner for one side (camera or Gallery), then returns the
- * auto-cropped/perspective-corrected JPEG to this screen. SAVE ID opens the two-sided NID preview.
+ * opens our own CameraX/OpenCV scanner for exactly one selected side, with automatic
+ * cropping and local image cleaning. SAVE ID opens the two-sided NID preview.
  */
 @Composable
 fun NidScanSetupScreen(
     viewModel: ScannerViewModel,
     onBack: () -> Unit,
-    onSave: () -> Unit
+    onSave: () -> Unit,
+    onScanSide: (Int) -> Unit
 ) {
     val pages by viewModel.capturedPages.collectAsStateWithLifecycle()
     val isProcessing by viewModel.isProcessing.collectAsStateWithLifecycle()
     val processingStage by viewModel.nidProcessingStage.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    var pendingSide by remember { mutableStateOf(1) }
-
-    val mlKitSideLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { activityResult ->
-        if (activityResult.resultCode == Activity.RESULT_OK) {
-            val result = MlKitDocumentScannerHelper.extractResult(activityResult.data)
-            if (result != null && result.imageUris.isNotEmpty()) {
-                viewModel.processNidMlKitSideResult(
-                    scanResult = result,
-                    side = pendingSide
-                )
-            } else {
-                Toast.makeText(context, "No NID image returned by ML Kit", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    fun launchMlKitForSide(side: Int) {
+    val selectedType by viewModel.selectedIdCardType.collectAsStateWithLifecycle()
+    val twoSided = selectedType.isTwoSided
+    fun scanSide(side: Int) {
         if (isProcessing) return
-        pendingSide = if (side == 2) 2 else 1
-        viewModel.prepareNidMlKitSide(pendingSide)
-
-        val activity = context.findNidActivity()
-        if (activity == null) {
-            Toast.makeText(context, "Cannot open ML Kit scanner", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        MlKitDocumentScannerHelper.startScanning(
-            activity = activity,
-            options = MlKitDocumentScannerHelper.createNidSideScannerOptions(),
-            onIntentSenderReady = { intentSender ->
-                mlKitSideLauncher.launch(
-                    IntentSenderRequest.Builder(intentSender).build()
-                )
-            },
-            onError = { error ->
-                Toast.makeText(
-                    context,
-                    "ML Kit Scanner: ${error.localizedMessage ?: "Could not open scanner"}",
-                    Toast.LENGTH_SHORT
-                ).show()
-            }
-        )
+        val selectedSide = if (side == 2) 2 else 1
+        viewModel.prepareNidSetupSide(selectedSide)
+        onScanSide(selectedSide)
     }
 
     val front = pages.firstOrNull { it.label.startsWith("Front", ignoreCase = true) }
     val back = pages.firstOrNull { it.label.startsWith("Back", ignoreCase = true) }
-    val bothReady = front != null && back != null
+    val bothReady = front != null && (!twoSided || back != null)
 
     Box(
         modifier = Modifier
@@ -165,7 +115,7 @@ fun NidScanSetupScreen(
                     )
                 }
                 Text(
-                    text = "Scan ID",
+                    text = "Scan ${selectedType.title}",
                     color = NidBlue,
                     fontSize = 23.sp,
                     fontWeight = FontWeight.Bold,
@@ -176,7 +126,7 @@ fun NidScanSetupScreen(
             Spacer(Modifier.height(10.dp))
 
             Text(
-                text = "Scan the front and back of your ID",
+                text = if (twoSided) "Scan the front and back of your ${selectedType.title}" else "Scan your ${selectedType.title}",
                 color = NidText,
                 fontSize = 17.sp,
                 lineHeight = 23.sp,
@@ -185,28 +135,29 @@ fun NidScanSetupScreen(
             Spacer(Modifier.height(20.dp))
 
             NidSideSection(
-                title = "FRONT",
+                title = if (twoSided) "FRONT" else selectedType.title.uppercase(),
                 page = front,
                 isFront = true,
-                onClick = { launchMlKitForSide(1) }
+                onClick = { scanSide(1) }
             )
 
-            Spacer(Modifier.height(14.dp))
-
-            NidSideSection(
-                title = "BACK",
-                page = back,
-                isFront = false,
-                onClick = { launchMlKitForSide(2) }
-            )
+            if (twoSided) {
+                Spacer(Modifier.height(14.dp))
+                NidSideSection(
+                    title = "BACK",
+                    page = back,
+                    isFront = false,
+                    onClick = { scanSide(2) }
+                )
+            }
 
             Spacer(Modifier.height(14.dp))
 
             Text(
                 text = if (bothReady) {
-                    "Both sides are ready. Tap SAVE ID to auto-crop and create your NID preview."
+                    if (twoSided) "Both sides are ready. Save to create one A4 page." else "Your ${selectedType.title} is ready for an A4 preview."
                 } else {
-                    "Scan both sides to save them together on one page."
+                    if (twoSided) "Scan both sides to save them together on one page." else "Capture the document to create an A4 copy."
                 },
                 color = if (bothReady) Color(0xFF5F6B76) else NidSubText,
                 fontSize = 13.sp,
@@ -248,7 +199,7 @@ fun NidScanSetupScreen(
                     )
                 } else {
                     Text(
-                        text = "SAVE ID",
+                        text = "SAVE ${selectedType.title.uppercase()}",
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -412,12 +363,3 @@ private fun NidPlaceholderIllustration(isFront: Boolean) {
     }
 }
 
-
-private fun Context.findNidActivity(): Activity? {
-    var current: Context? = this
-    while (current is ContextWrapper) {
-        if (current is Activity) return current
-        current = current.baseContext
-    }
-    return current as? Activity
-}

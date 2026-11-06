@@ -3,7 +3,6 @@ package com.docscan.ui.components
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
@@ -26,7 +25,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathOperation
@@ -35,7 +33,6 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import kotlin.math.hypot
@@ -74,16 +71,6 @@ fun BlueEdgeOverlay(
         label = "cam_pulse"
     )
 
-    val laserProgress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "cam_laser"
-    )
-
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = constraints.maxHeight.toFloat()
@@ -110,19 +97,22 @@ fun BlueEdgeOverlay(
                         animP1.snapTo(mapped[1])
                         animP2.snapTo(mapped[2])
                         animP3.snapTo(mapped[3])
-                        animAlpha.animateTo(1f, tween(140, easing = LinearOutSlowInEasing))
+                        animAlpha.animateTo(1f, tween(90, easing = LinearOutSlowInEasing))
                     } else {
-                        // Deadband threshold: if movement is under 3.5px (minor hand tremor / noise), freeze!
+                        // Small changes are sensor/detection jitter, not paper
+                        // motion. Once aligned, use a larger hold band so the
+                        // outline stays visually locked to the sheet.
                         val d0 = hypot(mapped[0].x - animP0.targetValue.x, mapped[0].y - animP0.targetValue.y)
                         val d1 = hypot(mapped[1].x - animP1.targetValue.x, mapped[1].y - animP1.targetValue.y)
                         val d2 = hypot(mapped[2].x - animP2.targetValue.x, mapped[2].y - animP2.targetValue.y)
                         val d3 = hypot(mapped[3].x - animP3.targetValue.x, mapped[3].y - animP3.targetValue.y)
                         val maxDelta = maxOf(d0, d1, d2, d3)
 
-                        if (maxDelta >= 3.5f) {
+                        val holdBandPx = if (state == com.docscan.util.DetectionState.DOCUMENT_STABLE) 8f else 5f
+                        if (maxDelta >= holdBandPx) {
                             val glideSpring = spring<Offset>(
                                 dampingRatio = Spring.DampingRatioNoBouncy,
-                                stiffness = Spring.StiffnessMediumLow
+                                stiffness = Spring.StiffnessHigh
                             )
                             launch { animP0.animateTo(mapped[0], glideSpring) }
                             launch { animP1.animateTo(mapped[1], glideSpring) }
@@ -166,11 +156,9 @@ fun BlueEdgeOverlay(
                     animP2.value,
                     animP3.value
                 )
-                drawAuthenticCamScannerQuad(
+                drawDocumentOutline(
                     pts = currentPts,
-                    isStable = (state == com.docscan.util.DetectionState.DOCUMENT_STABLE),
-                    pulseGlow = pulseGlow,
-                    laserProgress = laserProgress,
+                    isStable = state == com.docscan.util.DetectionState.DOCUMENT_STABLE,
                     alpha = animAlpha.value
                 )
             }
@@ -214,171 +202,29 @@ private val CamScannerTeal = Color(0xFF28D8A1)       // Signature mint-teal line
 private val CamScannerTealBright = Color(0xFF38EFB6) // Stable locked crisp mint-teal
 private val CamScannerTealGlow = Color(0x4028D8A1)   // Soft outer edge glow
 
-/**
- * Draws the authentic CamScanner quadrilateral line:
- * - A clean, sleek continuous Mint-Teal boundary contour
- * - Subtle ambient glow to make edges instantly distinguishable against any background
- * - Rounded joints for refined corner aesthetics
- * - Viewfinder remains clean and clear (no dark scrim or distracting clutter)
- */
-private fun DrawScope.drawAuthenticCamScannerQuad(
+/** A light mint four-edge contour without camera-view handles or scanning lasers. */
+private fun DrawScope.drawDocumentOutline(
     pts: List<Offset>,
     isStable: Boolean,
-    pulseGlow: Float,
-    laserProgress: Float,
     alpha: Float
 ) {
     if (pts.size != 4) return
-    val (p0, p1, p2, p3) = pts // TL, TR, BR, BL
-
-    val lineColor = if (isStable) CamScannerTealBright else CamScannerTeal
-
-    // 1. Build document quad path
-    val quadPath = Path().apply {
-        moveTo(p0.x, p0.y)
-        lineTo(p1.x, p1.y)
-        lineTo(p2.x, p2.y)
-        lineTo(p3.x, p3.y)
+    val path = Path().apply {
+        moveTo(pts[0].x, pts[0].y)
+        for (i in 1..3) lineTo(pts[i].x, pts[i].y)
         close()
     }
-
-    // 2. Translucent document wash
-    val interiorTint = CamScannerTeal.copy(alpha = (if (isStable) 0.05f else 0.025f) * alpha)
-    drawPath(quadPath, interiorTint, style = Fill)
-
-    // 3. High-Tech CamScanner Laser Scan Sweep across document surface
-    clipPath(quadPath) {
-        val topY = minOf(p0.y, p1.y, p2.y, p3.y)
-        val botY = maxOf(p0.y, p1.y, p2.y, p3.y)
-        val docH = (botY - topY).coerceAtLeast(10f)
-        val currentLaserY = topY + docH * laserProgress
-        val beamThickness = 26.dp.toPx()
-
-        val laserBrush = Brush.verticalGradient(
-            colors = listOf(
-                Color.Transparent,
-                CamScannerTeal.copy(alpha = 0.20f * alpha),
-                CamScannerTealBright.copy(alpha = 0.50f * alpha),
-                CamScannerTeal.copy(alpha = 0.20f * alpha),
-                Color.Transparent
-            ),
-            startY = currentLaserY - beamThickness,
-            endY = currentLaserY + beamThickness
-        )
-        drawRect(
-            brush = laserBrush,
-            topLeft = Offset(0f, currentLaserY - beamThickness),
-            size = Size(size.width, beamThickness * 2f)
-        )
-        // Thin glowing center laser beam
-        drawLine(
-            color = CamScannerTealBright.copy(alpha = 0.85f * alpha),
-            start = Offset(0f, currentLaserY),
-            end = Offset(size.width, currentLaserY),
-            strokeWidth = 1.8.dp.toPx()
-        )
-    }
-
-    // 4. Soft outer edge glow for high visibility over wooden/white/textured tables
-    val glowWidth = if (isStable) 5.5.dp.toPx() else 4.2.dp.toPx()
+    // The normal camera view has no midpoint handles; users edit corners after capture.
+    drawPath(path, CamScannerTeal.copy(alpha = 0.045f * alpha), style = Fill)
     drawPath(
-        path = quadPath,
-        color = CamScannerTealGlow.copy(alpha = 0.40f * pulseGlow * alpha),
+        path = path,
+        color = (if (isStable) CamScannerTealBright else CamScannerTeal).copy(alpha = alpha),
         style = Stroke(
-            width = glowWidth,
+            width = if (isStable) 2.5.dp.toPx() else 2.1.dp.toPx(),
             cap = StrokeCap.Round,
             join = StrokeJoin.Round
         )
     )
-
-    // 5. Exact CamScanner crisp boundary line (2.2dp width, rounded joins)
-    val mainStrokeWidth = if (isStable) 2.4.dp.toPx() else 2.1.dp.toPx()
-    drawPath(
-        path = quadPath,
-        color = lineColor.copy(alpha = 0.98f * alpha),
-        style = Stroke(
-            width = mainStrokeWidth,
-            cap = StrokeCap.Round,
-            join = StrokeJoin.Round
-        )
-    )
-
-    // 6. Midpoint Edge Guides (4 sides)
-    val midpoints = listOf(
-        Offset((p0.x + p1.x) / 2f, (p0.y + p1.y) / 2f), // Top
-        Offset((p1.x + p2.x) / 2f, (p1.y + p2.y) / 2f), // Right
-        Offset((p2.x + p3.x) / 2f, (p2.y + p3.y) / 2f), // Bottom
-        Offset((p3.x + p0.x) / 2f, (p3.y + p0.y) / 2f)  // Left
-    )
-    val midOuterR = 4.2.dp.toPx()
-    val midInnerR = 1.8.dp.toPx()
-    midpoints.forEach { mid ->
-        drawCircle(Color(0x99000000), radius = midOuterR + 1.5.dp.toPx(), center = mid)
-        drawCircle(lineColor.copy(alpha = 0.95f * alpha), radius = midOuterR, center = mid)
-        drawCircle(Color.White.copy(alpha = alpha), radius = midInnerR, center = mid)
-    }
-
-    // 7. Iconic CamScanner 4 Corner Targeting Reticles & L-brackets
-    val cornerRingR = if (isStable) 11.dp.toPx() * pulseGlow else 9.5.dp.toPx()
-    val pinRadius = 5.2.dp.toPx()
-    val centerDotR = 2.2.dp.toPx()
-    val bracketLen = 16.dp.toPx()
-    val bracketStroke = 3.2.dp.toPx()
-
-    val cornerList = listOf(p0 to 0, p1 to 1, p2 to 2, p3 to 3)
-    for ((pt, idx) in cornerList) {
-        // Dark translucent backing for high-contrast visibility against white paper
-        drawCircle(
-            color = Color(0xAA0F172A),
-            radius = cornerRingR + 2.dp.toPx(),
-            center = pt
-        )
-        // Outer targeting pulse ring
-        drawCircle(
-            color = lineColor.copy(alpha = 0.50f * pulseGlow * alpha),
-            radius = cornerRingR,
-            center = pt,
-            style = Stroke(width = 1.5.dp.toPx())
-        )
-        // Solid Mint Pin
-        drawCircle(
-            color = lineColor.copy(alpha = 0.98f * alpha),
-            radius = pinRadius,
-            center = pt
-        )
-        // Crisp Pure White Center Dot
-        drawCircle(
-            color = Color.White.copy(alpha = alpha),
-            radius = centerDotR,
-            center = pt
-        )
-
-        // Corner L-brackets hugging the two incoming edges
-        val prevPt = pts[(idx + 3) % 4]
-        val nextPt = pts[(idx + 1) % 4]
-        val dPrev = Offset(prevPt.x - pt.x, prevPt.y - pt.y)
-        val dNext = Offset(nextPt.x - pt.x, nextPt.y - pt.y)
-        val lPrev = hypot(dPrev.x, dPrev.y).coerceAtLeast(1e-4f)
-        val lNext = hypot(dNext.x, dNext.y).coerceAtLeast(1e-4f)
-
-        val uPrev = Offset(dPrev.x / lPrev, dPrev.y / lPrev)
-        val uNext = Offset(dNext.x / lNext, dNext.y / lNext)
-
-        drawLine(
-            color = lineColor.copy(alpha = alpha),
-            start = pt,
-            end = Offset(pt.x + uPrev.x * bracketLen, pt.y + uPrev.y * bracketLen),
-            strokeWidth = bracketStroke,
-            cap = StrokeCap.Round
-        )
-        drawLine(
-            color = lineColor.copy(alpha = alpha),
-            start = pt,
-            end = Offset(pt.x + uNext.x * bracketLen, pt.y + uNext.y * bracketLen),
-            strokeWidth = bracketStroke,
-            cap = StrokeCap.Round
-        )
-    }
 }
 
 /**
